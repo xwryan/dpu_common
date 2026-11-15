@@ -1,13 +1,11 @@
-// tests：QSCH Function→net 自动/随机映射的聚焦测试，依赖真实 DPU resolver 和 BAR map。
-// 本模块持有测试配置及导出的队列值；不分配真实 ring、不伪造 PCIe 完成、不访问 DUT。
-// 检查多 Host/PF/VF、不等长队列组、共享 group、所有表的内容/索引及重复查询稳定性。
+// QSCH Function→net 自动/随机映射聚焦测试：多 Host/PF/VF、不等长队列组、共享 group、各表内容/索引与重复查询稳定性。
+// 使用真实 resolver 与 BAR map，不分配 ring、不伪造 PCIe 完成、不访问 DUT。
 module dpu_qsch_cfg_test;
 	import uvm_pkg::*;
 	import dpu_resource_pkg::*;
 	import aip_core_pkg::*;
 	`include "uvm_macros.svh"
 
-	// 将失败立即定位到关联约束；正常测试不依赖捕获或降级 UVM 报错。
 	function automatic void check(input bit	ok, input string	why);
 		if (!ok) `uvm_fatal("QSCH_TEST", why)
 	endfunction

@@ -1,6 +1,5 @@
-// src：当前 DUT 公共表值类型；仅依赖 DPU 身份、BAR 与资源快照。
-// packed 只描述线格式；普通记录借用冻结快照，不拥有或释放设备/DMA 资源。
-// 保留 X/Z 供发送前拒绝；所有未知模块基址和端口由平台明确声明。
+// 当前 DUT 公共表的值类型：packed 结构只描述线格式，普通记录借用冻结快照、不拥有设备/DMA 资源。
+// 保留 X/Z 以便发送前拒绝；未知模块基址和端口由平台显式声明。
 
 typedef struct packed {
 	logic [12:0]	reserved_31_19;
@@ -259,9 +258,8 @@ typedef struct {
 	dpu_bar_target_t		members[$];
 } dpu_bar_mapping_cfg_t;
 
-// 平台控制项没有截图线格式，保留显式声明的 raw/mask；不同类别仍使用独立 hook。
-// consumers_complete 声明 catalog 的共享消费者完整（允许明确空集）；AF/SPWRR/TC_WEIGHT 必填。
-// MSI-X/RNET/RDMA 自动加入实际 owner service；非空额外消费者也必须声明完整并属于冻结拓扑。
+// 平台控制项无截图线格式，保留显式 raw/mask，各类别独立 hook。consumers_complete 声明共享消费者完整（允许空集），AF/SPWRR/TC_WEIGHT 必填；
+// MSI-X/RNET/RDMA 自动加入实际 owner service，非空额外消费者也须声明完整并属于冻结拓扑。
 typedef struct {
 	dpu_table_ctx_t		ctx;
 	dpu_function_key_t	owner;
@@ -271,7 +269,7 @@ typedef struct {
 	logic [127:0]		writable_mask;
 } dpu_control_cfg_t;
 
-// bdf 单项值：ctx 与 owner/消费者独立保存；仅 entry 是硬件线格式。
+// 以下各单项值：ctx 与 owner/消费者独立保存，仅 entry 是硬件线格式。
 typedef struct {
 	dpu_table_ctx_t		ctx;
 	dpu_function_key_t	owner;
@@ -279,7 +277,6 @@ typedef struct {
 	dpu_bdf_entry_t		entry;
 } dpu_bdf_cfg_t;
 
-// completion_bdf 单项值：ctx 与 owner/消费者独立保存；仅 entry 是硬件线格式。
 typedef struct {
 	dpu_table_ctx_t				ctx;
 	dpu_function_key_t			owner;
@@ -287,7 +284,6 @@ typedef struct {
 	dpu_completion_bdf_entry_t	entry;
 } dpu_completion_bdf_cfg_t;
 
-// pfvf 单项值：ctx 与 owner/消费者独立保存；仅 entry 是硬件线格式。
 typedef struct {
 	dpu_table_ctx_t		ctx;
 	dpu_function_key_t	owner;
@@ -295,7 +291,6 @@ typedef struct {
 	dpu_pfvf_entry_t	entry;
 } dpu_pfvf_cfg_t;
 
-// tlp_prefix 单项值：ctx 与 owner/消费者独立保存；仅 entry 是硬件线格式。
 typedef struct {
 	dpu_table_ctx_t			ctx;
 	dpu_function_key_t		owner;
@@ -303,7 +298,6 @@ typedef struct {
 	dpu_tlp_prefix_entry_t	entry;
 } dpu_tlp_prefix_cfg_t;
 
-// msix_linear 单项值：ctx 与 owner/消费者独立保存；仅 entry 是硬件线格式。
 typedef struct {
 	dpu_table_ctx_t			ctx;
 	dpu_function_key_t		owner;
@@ -311,7 +305,6 @@ typedef struct {
 	dpu_msix_linear_entry_t	entry;
 } dpu_msix_linear_cfg_t;
 
-// msix_info 单项值：ctx 与 owner/消费者独立保存；仅 entry 是硬件线格式。
 typedef struct {
 	dpu_table_ctx_t			ctx;
 	dpu_function_key_t		owner;
@@ -319,7 +312,6 @@ typedef struct {
 	dpu_msix_info_entry_t	entry;
 } dpu_msix_info_cfg_t;
 
-// msix_interval 单项值：ctx 与 owner/消费者独立保存；仅 entry 是硬件线格式。
 typedef struct {
 	dpu_table_ctx_t				ctx;
 	dpu_function_key_t			owner;
@@ -327,7 +319,6 @@ typedef struct {
 	dpu_msix_interval_entry_t	entry;
 } dpu_msix_interval_cfg_t;
 
-// msix_table 单项值：ctx 与 owner/消费者独立保存；仅 entry 是硬件线格式。
 typedef struct {
 	dpu_table_ctx_t			ctx;
 	dpu_function_key_t		owner;
@@ -335,7 +326,6 @@ typedef struct {
 	dpu_msix_table_entry_t	entry;
 } dpu_msix_table_cfg_t;
 
-// qsch_q2tc 单项值：ctx 与 owner/消费者独立保存；仅 entry 是硬件线格式。
 typedef struct {
 	dpu_table_ctx_t			ctx;
 	dpu_function_key_t		owner;
@@ -343,7 +333,6 @@ typedef struct {
 	dpu_qsch_q2tc_entry_t	entry;
 } dpu_qsch_q2tc_cfg_t;
 
-// qsch_n2g 单项值：ctx 与 owner/消费者独立保存；仅 entry 是硬件线格式。
 typedef struct {
 	dpu_table_ctx_t			ctx;
 	dpu_function_key_t		owner;
@@ -351,7 +340,6 @@ typedef struct {
 	dpu_qsch_n2g_entry_t	entry;
 } dpu_qsch_n2g_cfg_t;
 
-// qsch_g2p 单项值：ctx 与 owner/消费者独立保存；仅 entry 是硬件线格式。
 typedef struct {
 	dpu_table_ctx_t			ctx;
 	dpu_function_key_t		owner;
@@ -359,7 +347,6 @@ typedef struct {
 	dpu_qsch_g2p_entry_t	entry;
 } dpu_qsch_g2p_cfg_t;
 
-// qsch_rnet 单项值：ctx 与 owner/消费者独立保存；仅 entry 是硬件线格式。
 typedef struct {
 	dpu_table_ctx_t			ctx;
 	dpu_function_key_t		owner;
@@ -367,7 +354,6 @@ typedef struct {
 	dpu_qsch_rnet_entry_t	entry;
 } dpu_qsch_rnet_cfg_t;
 
-// rdma_notify 单项值：ctx 与 owner/消费者独立保存；仅 entry 是硬件线格式。
 typedef struct {
 	dpu_table_ctx_t			ctx;
 	dpu_function_key_t		owner;
@@ -432,7 +418,6 @@ class dpu_cfg_scope extends uvm_object;
 	local dpu_table_kind_e		m_kinds[$];
 	local dpu_service_key_t		m_services[$];
 
-	// 仅保存选择，不分配资源；未知/重复身份由 validate 在写表前拒绝。
 	extern function new(
 		string				name,
 		dpu_device_snapshot	snapshot,
@@ -441,22 +426,21 @@ class dpu_cfg_scope extends uvm_object;
 		dpu_table_kind_e	kinds[$] = {},
 		dpu_service_key_t	services[$] = {}
 	);
-	// 只接受同一冻结快照和实际 Function/BAR/service，失败给出原因。
+	// 写表前预检完整选择：只接受同一冻结快照中的实际 Function/BAR/service，失败给出原因。
 	extern function bit validate(
 		input dpu_device_snapshot	snapshot,
 		output string				why
 	);
 	// 空集合选择全部，非连续集合按完整身份匹配。
 	extern function bit selects(input dpu_function_key_t	key);
-	// BAR ID 是偶数编号，不是 role。
+	// bar_id 是实际偶数编号而非 role；空列表选中 Function 的全部租约。
 	extern function bit selects_bar(input int unsigned	bar_id);
-	// 仅筛选类别，不重新编号。
+	// 空列表表示全部类别；明确类别只能确认自己的账本项。
 	extern function bit selects_kind(input dpu_table_kind_e	kind);
 	// service 选择还受 Function 范围约束。
 	extern function bit selects_service(input dpu_service_key_t	key);
 endclass
 
-// 保存选择及快照身份，后续不允许换代复用。
 function dpu_cfg_scope::new(
 	string				name,
 	dpu_device_snapshot	snapshot,
@@ -473,7 +457,6 @@ function dpu_cfg_scope::new(
 	m_services = services;
 endfunction
 
-// 预检完整选择，避免写到一半才发现未知成员；不依赖任何传输或 ring 类型。
 function bit dpu_cfg_scope::validate(
 	input dpu_device_snapshot	snapshot,
 	output string				why
@@ -528,28 +511,24 @@ function bit dpu_cfg_scope::validate(
 	return 1;
 endfunction
 
-// 不按全局编号范围推测成员，非连续 Function 保持原身份。
 function bit dpu_cfg_scope::selects(input dpu_function_key_t	key);
 	if (m_keys.size() == 0) return 1;
 	foreach (m_keys[i]) if (dpu_same_function_key(m_keys[i], key)) return 1;
 	return 0;
 endfunction
 
-// 空 BAR 列表表示选中 Function 的实际全部租约。
 function bit dpu_cfg_scope::selects_bar(input int unsigned	bar_id);
 	if (m_bars.size() == 0) return 1;
 	foreach (m_bars[i]) if (m_bars[i] == bar_id) return 1;
 	return 0;
 endfunction
 
-// 空类别列表保持全类别视图；明确类别只能确认其自己的账本项。
 function bit dpu_cfg_scope::selects_kind(input dpu_table_kind_e	kind);
 	if (m_kinds.size() == 0) return 1;
 	foreach (m_kinds[i]) if (m_kinds[i] == kind) return 1;
 	return 0;
 endfunction
 
-// 完整 service 身份与 Function 过滤同时成立才选中。
 function bit dpu_cfg_scope::selects_service(input dpu_service_key_t	key);
 	if (!selects(key.function_key)) return 0;
 	if (m_services.size() == 0) return 1;

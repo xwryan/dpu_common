@@ -1,5 +1,4 @@
-// integration/pcie：可选 DPU/PCIe 配置入口；DPU 核心与 PCIe TL 之后编译。
-// 不包含 VIO 或参考 project，不创建运行期对象；原生 PCIe TL 不反向依赖 DPU。
+// 可选的 DPU/PCIe 集成包：须在 DPU 核心与 PCIe TL 之后编译；原生 PCIe TL 不反向依赖 DPU。
 package dpu_pcie_pkg;
 	timeunit 1ns;
 	timeprecision 1ps;

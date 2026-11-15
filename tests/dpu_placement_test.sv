@@ -306,9 +306,8 @@ class dpu_placement_test extends uvm_test;
         pf2 = make_function_key(0, 2, DPU_FUNCTION_PF, 0);
         pf3 = make_function_key(0, 3, DPU_FUNCTION_PF, 0);
 
-        // Two mandatory EXACT 1 devices contribute only two pairs.  The next
-        // required flexible participant must honor the preferred owner even
-        // though an ordinary candidate precedes it in effective order.
+        // Two mandatory EXACT-1 devices contribute only two pairs; the next required flexible participant
+        // must honor the preferred owner even though an ordinary candidate precedes it in effective order.
         placement_cfg = make_placement_cfg();
         request = make_request(130, 33, DPU_VIO_CANDIDATE_PF_ONLY,
                                DPU_VIO_DEVICE_AUTO_MINIMUM);

@@ -1,26 +1,19 @@
-// integration/pcie：供 AIP reg_acc 使用的 PF0 BAR0 相对地址访问 sequence。
-// 继承 pcie_tl_reg_seq 的命令字段；依赖 dpu_cfg 中真实 BAR registry 和 RC sequencer。
-// cfg 由用户赋值或从启动 sequencer 的 dpu_cfg 获取；本类借用句柄，不分配或配置 DUT 资源。
-// addr 始终是 Host0/PF0 BAR0 内偏移，完整请求先检查范围，再交原生 seq 发送 Memory TLP。
-// 每次执行清空输出；失败通过 status/error_msg 返回 Tcl，不 fatal、不累加修改 addr。
+// 供 AIP reg_acc 使用的 Host0/PF0 BAR0 相对地址访问 sequence：先检查完整请求范围，再交原生 seq 发送 Memory TLP。
+// cfg 可由用户赋值或取自启动 sequencer 的 dpu_cfg；失败经 status/error_msg 返回 Tcl，不 fatal，也不累加修改 addr。
 class dpu_bar_reg_seq extends pcie_tl_reg_seq;
 	`uvm_object_utils(dpu_bar_reg_seq)
 
 	dpu_env_cfg	cfg;
 
-	// 保留原寄存器命令默认宽度和 byte skip-mask 语义。
 	extern function new(string	name = "dpu_bar_reg_seq");
-	// 解析真实 BAR0 基址和 Host0 RC，原样传递读写字段并回传结果；不启动 DUT 配置流程。
+	// 解析真实 BAR0 基址与 Host0 RC 后原样转发读写；整个 len（含 masked 字节）在发送前校验，posted 写成功仅表示已发送。
 	extern virtual task body();
 endclass
 
-// 输入默认值沿用 pcie_tl_reg_seq，cfg 初始为空便于直接使用已有 dpu_cfg 注册。
 function dpu_bar_reg_seq::new(string	name);
 	super.new(name);
 endfunction
 
-// 整个 len 范围在发送前校验，包括 masked 字节；posted 写成功仅表示发送完成。
-// 显式 new 原生子 seq，避免用户把父类 factory override 到本类后递归创建包装层。
 task dpu_bar_reg_seq::body();
 	dpu_bar_target_t				target;
 	bit [63:0]						absolute_address;
@@ -61,6 +54,7 @@ task dpu_bar_reg_seq::body();
 			  $sformatf(
 				  "h0.pf0.bar0 base=0x%016h + offset=0x%016h = address=0x%016h len=%0d write=%0b",
 				  target.bar_lease.base, addr, absolute_address, len, is_write), UVM_LOW)
+	// 显式 new 原生子 seq：若用户把父类 factory override 到本类，create 会递归创建包装层。
 	request                 = new("pf0_bar0_request");
 	request.is_write        = is_write;
 	request.addr            = absolute_address;

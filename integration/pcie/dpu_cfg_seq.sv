@@ -1,12 +1,6 @@
-// integration/pcie：公共 DUT 表配置 sequence；只依赖 dpu_env_cfg 与原生 PCIe TL。
-// 依赖 cfg 中的真实 BAR/队列视图与 PCIe RC sequencer；不创建第二套 context 或 env。
-// task/hook 属于本 sequence，DPU cfg 保存参数、资源与表项数据；ring/BAR 不归 seq 所有。
-// 所有硬件访问复用 pcie_tl_reg_seq，经实际目标 RC、Intel bind 发往 DUT。
-// 默认 body 先声明 Host0/PF0 为 AF 并单次读回状态8，再配置 BDF、VIO/QSCH；MSI-X 按完成模式选择。
-// 已知表按图片字段和 cfg 地址真实写入；读回可选，失败报告 fatal 并保留 DMA 资源。
-// Notify 仅访问实际队列对的有效项；首次配置前 DUT 已按 05.png 复位为无效项：
-// type=3，lookup key/global_qid 全1，reserved=0。未用槽位保持该复位值，不由 seq 写入或读回。
-// VIO/RDMA 每批全部表项成功后，每个管理 BAR 写一次 +0x80044=1；失败不继续使能。
+// 公共 DUT 表配置 sequence：只依赖 dpu_env_cfg 与原生 PCIe TL，所有访问经 pcie_tl_reg_seq 发往实际目标 RC；ring/BAR 不归 seq 所有。
+// 默认 body：Host0/PF0 声明为 AF 并读回状态 8，再配置 BDF、VIO/QSCH（MSI-X 按完成模式）；VIO/RDMA 每批成功后每个管理 BAR 写一次 +0x80044=1。
+// Notify 只写实际队列对的有效项；未用槽位保持 DUT 复位值（05.png：type=3，lookup key/global_qid 全 1，reserved=0），seq 不写不读。
 class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
 	`uvm_object_utils(dpu_cfg_seq)
 
@@ -17,22 +11,21 @@ class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
 	// 当前 seq 自上次成功 AF 状态读之后完成的完整 DWORD 写数；每次 start 独立计数。
 	protected int unsigned	writes_since_af_read;
 
-	// 对象只保存本次执行结果；运行期共享状态始终在 cfg，不随 sequence 销毁。
 	extern function new(string	name = "dpu_cfg_seq");
 
-	// start 时取得配置句柄；派生 body 自动获得 cfg，不需要调用 env 的配置 task。
+	// UVM 即使 start(..., call_pre_post=0) 也调用 pre_start，故在此取 cfg，派生 body 可直接使用。
 	extern virtual task pre_start();
 
 	// 平台先等待复位就绪；AF 声明先于写表，VIO 在写入、所选验证和 commit 后成功。
 	extern virtual task body();
 
-	// 固定向 Host0/PF0 BAR0+0x1010 写声明后读一次状态8；不轮询，任一步失败停止。
+	// 向 Host0/PF0 BAR0+0x1010 写声明后同步读一次状态，须为 8；不受 configure_public/verify_readback 控制，不轮询，任一步失败停止。
 	extern virtual task declare_af(
 		output bit		ok,
 		output string	why
 	);
 
-	// 单次读取固定状态寄存器并要求8；成功后清写计数，失败保留原因，不轮询。
+	// 同步读一次 AF 状态并要求为 8（首次声明及每 100 笔完整 DWORD 写各一次，Completion 返回前不得继续写）；成功清写计数，不轮询。
 	extern protected task read_af_status(
 		output bit		ok,
 		output string	why
@@ -47,7 +40,7 @@ class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
 		input bit		ok
 	);
 
-	// MMIO helper 校验四态输入和完整范围，posted success 仅表示发送完成。
+	// offset 相对所选 Function 的真实 BAR（失败不回退默认窗口）；校验四态输入与完整范围，posted 成功仅表示已发送。
 	extern task pcie_bar_write(
 		input dpu_function_key_t	owner,
 		input int unsigned			bar_id,
@@ -118,7 +111,8 @@ class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
 		output string				why
 	);
 
-	// typed helper 在首笔发送前校验完整表项，随后顺序发送所有 DWORD。
+	// 首笔发送前校验完整表项绑定与字段宽度，再由高到低顺序发送全部 DWORD（enabling 只改声明的 enable/mask 位）；
+	// VTX/VRX 四笔数据全部成功后才发 clear/trigger，期间不插入其他表访问。
 	extern protected task checked_write(
 		input dpu_table_item_t	record,
 		input logic [127:0]		value,
@@ -127,7 +121,7 @@ class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
 		output string			why
 	);
 
-	// 全部四态检查在转换前执行；check_read_data 仅为状态读关闭 SCB 的 RAM 写值比较。
+	// 四态检查在转换为两态 registry/sequence 前完成（保留小端 byte lane 与 skip-mask 语义）；check_read_data 仅为状态读关闭 SCB 的 RAM 写值比较。
 	extern protected task mmio(
 		input dpu_bar_target_t	target,
 		input bit				writing,
@@ -141,7 +135,8 @@ class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
 		input bit				check_read_data = 1
 	);
 
-	// 统一表项写序；保留原始 mmio 的宽度/掩码语义，禁止先发送再发现越界。
+	// 统一表项写序：≤128 bit 表项每次发 32 bit，高位 DWORD 放高地址、DWORD 内字节不反转；
+	// 首笔前检查整项宽度、已知值、BAR 与 4KB 范围，禁止先发送再发现越界。
 	extern protected task write_table_dwords(
 		input dpu_bar_target_t	target,
 		input logic [63:0]		offset,
@@ -202,91 +197,82 @@ class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
 		output string			why
 	);
 
-	// 独立 configure_bar_table 入口；完整预检本 scope 后才调用对应单项 hook。
+	// 以下独立 configure_* 入口：完整预检本 scope 后才调用对应单项 hook，不隐含调用其他类别。
 	extern task configure_bar_table(
 		input dpu_cfg_scope	scope,
 		output bit			ok,
 		output string		why
 	);
 
-	// 独立 configure_af 入口；完整预检本 scope 后才调用对应单项 hook。
 	extern task configure_af(
 		input dpu_cfg_scope	scope,
 		output bit			ok,
 		output string		why
 	);
 
-	// 独立 configure_pf_vf_map 入口；完整预检本 scope 后才调用对应单项 hook。
 	extern task configure_pf_vf_map(
 		input dpu_cfg_scope	scope,
 		output bit			ok,
 		output string		why
 	);
 
-	// 独立 configure_bdf_table 入口；完整预检本 scope 后才调用对应单项 hook。
 	extern task configure_bdf_table(
 		input dpu_cfg_scope	scope,
 		output bit			ok,
 		output string		why
 	);
 
-	// 独立 configure_completion_bdf_table 入口；完整预检本 scope 后才调用对应单项 hook。
 	extern task configure_completion_bdf_table(
 		input dpu_cfg_scope	scope,
 		output bit			ok,
 		output string		why
 	);
 
-	// 独立 configure_tlp_prefix 入口；完整预检本 scope 后才调用对应单项 hook。
 	extern task configure_tlp_prefix(
 		input dpu_cfg_scope	scope,
 		output bit			ok,
 		output string		why
 	);
 
-	// 独立 configure_msix 入口；完整预检本 scope 后才调用对应单项 hook。
 	extern task configure_msix(
 		input dpu_cfg_scope	scope,
 		output bit			ok,
 		output string		why
 	);
 
-	// 独立 enable_msix 入口；完整预检本 scope 后才调用对应单项 hook。
 	extern task enable_msix(
 		input dpu_cfg_scope	scope,
 		output bit			ok,
 		output string		why
 	);
 
-	// 独立 configure_rdma_notify 入口；完整预检本 scope 后才调用对应单项 hook。
 	extern task configure_rdma_notify(
 		input dpu_cfg_scope	scope,
 		output bit			ok,
 		output string		why
 	);
 
-	// 独立 configure_qsch_rnet 入口；完整预检本 scope 后才调用对应单项 hook。
 	extern task configure_qsch_rnet(
 		input dpu_cfg_scope	scope,
 		output bit			ok,
 		output string		why
 	);
 
-	// 独立 configure_vio_notify 入口；不隐含调用其他类别。
+	// 每对队列只写一条排序后的有效 Notify 项（TX/RX 已由 cfg 去重）；不初始化或读回未用槽位。
 	extern task configure_vio_notify(
 		input dpu_cfg_scope	selection,
 		output bit			ok,
 		output string		why
 	);
 
-	// MSI-X linear 同样按查找键排列；完整流程填充单 bank 无效尾部，独立表入口不隐含初始化。
+	// MSI-X linear 按查找键排列；完整流程把单 bank 尾部填为无效行（非 reserved 字段全 1，排在目录末尾），
+	// 只用统一管理窗口的单 bank，不切换 bank、不写 ready 寄存器；独立表入口不隐含初始化。
 	extern protected task process_msix_tail(
 		input bit		verify,
 		output bit		ok,
 		output string	why
 	);
 
-	// 独立 configure_qsch 入口；不隐含调用其他类别。
 	extern task configure_qsch(
 		input dpu_cfg_scope	selection,
 		output bit			ok,
@@ -300,7 +286,6 @@ class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
 		output string		why
 	);
 
-	// 独立 configure_vio_queues 入口；不隐含调用其他类别。
 	extern task configure_vio_queues(
 		input dpu_cfg_scope	selection,
 		output bit			ok,
@@ -321,8 +306,8 @@ class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
 		output string		why
 	);
 
-	// 读回本轮基础 BDF 和所选 MSI-X 数据表；不要求平台实现其他公共表验证。
-	// 默认 body 仅在 verify_readback=1 时调用；显式调用本方法始终执行真实读取。
+	// 读回本轮 BDF 与所选 MSI-X 数据表（空 scope 表示该类别未执行，不会意外验证全部 Function）；
+	// 默认 body 仅在 verify_readback=1 时调用，显式调用总是真实读取。
 	extern virtual task verify_function_configuration(
 		input dpu_cfg_scope	bdf_scope,
 		input dpu_cfg_scope	msix_scope,
@@ -337,154 +322,134 @@ class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
 		output string		why
 	);
 
-	// 在发送前核对 ctx/binding/entry 与本代原件；不会把任意 raw 认作合法表项。
+	// 以下 typed 写入口在发送前核对 ctx/binding/entry 与本代原件，不接受任意 raw 表项；均复用唯一的逐 DWORD 写实现。
 	extern virtual task write_bdf(
 		input dpu_bdf_cfg_t	item,
 		output bit			ok,
 		output string		why
 	);
 
-	// 在发送前核对 ctx/binding/entry 与本代原件；不会把任意 raw 认作合法表项。
 	extern virtual task write_completion_bdf(
 		input dpu_completion_bdf_cfg_t	item,
 		output bit						ok,
 		output string					why
 	);
 
-	// 在发送前核对 ctx/binding/entry 与本代原件；不会把任意 raw 认作合法表项。
 	extern virtual task write_pfvf(
 		input dpu_pfvf_cfg_t	item,
 		output bit				ok,
 		output string			why
 	);
 
-	// 在发送前核对 ctx/binding/entry 与本代原件；不会把任意 raw 认作合法表项。
 	extern virtual task write_tlp_prefix(
 		input dpu_tlp_prefix_cfg_t	item,
 		output bit					ok,
 		output string				why
 	);
 
-	// 在发送前核对 ctx/binding/entry 与本代原件；不会把任意 raw 认作合法表项。
 	extern virtual task write_msix_linear(
 		input dpu_msix_linear_cfg_t	item,
 		output bit					ok,
 		output string				why
 	);
 
-	// 在发送前核对 ctx/binding/entry 与本代原件；不会把任意 raw 认作合法表项。
 	extern virtual task write_msix_info(
 		input dpu_msix_info_cfg_t	item,
 		output bit					ok,
 		output string				why
 	);
 
-	// 在发送前核对 ctx/binding/entry 与本代原件；不会把任意 raw 认作合法表项。
 	extern virtual task write_msix_interval(
 		input dpu_msix_interval_cfg_t	item,
 		output bit						ok,
 		output string					why
 	);
 
-	// 在发送前核对 ctx/binding/entry 与本代原件；不会把任意 raw 认作合法表项。
 	extern virtual task write_msix_table(
 		input dpu_msix_table_cfg_t	item,
 		output bit					ok,
 		output string				why
 	);
 
-	// 在发送前核对 ctx/binding/entry 与本代原件；不会把任意 raw 认作合法表项。
 	extern virtual task write_qsch_q2tc(
 		input dpu_qsch_q2tc_cfg_t	item,
 		output bit					ok,
 		output string				why
 	);
 
-	// 在发送前核对 ctx/binding/entry 与本代原件；不会把任意 raw 认作合法表项。
 	extern virtual task write_qsch_n2g(
 		input dpu_qsch_n2g_cfg_t	item,
 		output bit					ok,
 		output string				why
 	);
 
-	// 在发送前核对 ctx/binding/entry 与本代原件；不会把任意 raw 认作合法表项。
 	extern virtual task write_qsch_g2p(
 		input dpu_qsch_g2p_cfg_t	item,
 		output bit					ok,
 		output string				why
 	);
 
-	// 在发送前核对 ctx/binding/entry 与本代原件；不会把任意 raw 认作合法表项。
 	extern virtual task write_rdma_notify(
 		input dpu_rdma_notify_cfg_t	item,
 		output bit					ok,
 		output string				why
 	);
 
-	// 在发送前核对 ctx/binding/entry 与本代原件；不会把任意 raw 认作合法表项。
 	extern virtual task write_qsch_rnet(
 		input dpu_qsch_rnet_cfg_t	item,
 		output bit					ok,
 		output string				why
 	);
 
-	// 在发送前核对 ctx/binding/entry 与本代原件；不会把任意 raw 认作合法表项。
 	extern virtual task write_vtx(
 		input dpu_vtx_cfg_t	item,
 		output bit			ok,
 		output string		why
 	);
 
-	// 在发送前核对 ctx/binding/entry 与本代原件；不会把任意 raw 认作合法表项。
 	extern virtual task write_vrx(
 		input dpu_vrx_cfg_t	item,
 		output bit			ok,
 		output string		why
 	);
 
-	// 在发送前核对 ctx/binding/entry 与本代原件；不会把任意 raw 认作合法表项。
 	extern virtual task write_vio_notify(
 		input dpu_vio_notify_cfg_t	item,
 		output bit					ok,
 		output string				why
 	);
 
-	// 平台专有控制由用户实现，未知地址/语义不能默认成功。
+	// 以下 user_* hook 为平台专有控制，须由用户实现：默认不报告成功，也不自动调用旧 reset/init。
 	extern virtual task user_prepare_device(
 		input dpu_control_cfg_t	item,
 		output bit				ok,
 		output string			why
 	);
 
-	// 平台专有控制由用户实现，未知地址/语义不能默认成功。
 	extern virtual task user_configure_af(
 		input dpu_control_cfg_t	item,
 		output bit				ok,
 		output string			why
 	);
 
-	// 平台专有控制由用户实现，未知地址/语义不能默认成功。
 	extern virtual task user_configure_msix_control_entry(
 		input dpu_control_cfg_t	item,
 		output bit				ok,
 		output string			why
 	);
 
-	// 平台专有控制由用户实现，未知地址/语义不能默认成功。
 	extern virtual task user_configure_msix_function(
 		input dpu_control_cfg_t	item,
 		output bit				ok,
 		output string			why
 	);
 
-	// 平台专有控制由用户实现，未知地址/语义不能默认成功。
 	extern virtual task user_quiesce_device(
 		input dpu_control_cfg_t	item,
 		output bit				ok,
 		output string			why
 	);
 
-	// 平台专有控制由用户实现，未知地址/语义不能默认成功。
 	extern virtual task user_reset_device(
 		input dpu_control_cfg_t	item,
 		output bit				ok,
@@ -498,14 +463,15 @@ class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
 		output string				why
 	);
 
-	// 验证平台已有配置允许独立于写入入口调用；成功只确认传入 scope。
+	// 独立于写入入口验证平台已有配置；默认失败，成功只确认传入 scope。
 	extern virtual task user_verify_dpu_configuration(
 		input dpu_cfg_scope	scope,
 		output bit			ok,
 		output string		why
 	);
 
-	// 默认真实读回 Notify/QSCH/队列表并比较；项目可覆写自清零或只写寄存器的验证。
+	// 默认读回实际配置表（而非共享 staging 端口）并比较，已使能队列按 enable 位更新期望值，任一不符阻止 commit；
+	// 自清零或只写寄存器的项目可覆写此验证。
 	extern virtual task user_verify_vio_configuration(
 		input dpu_cfg_scope	selection,
 		output bit			ok,
@@ -519,7 +485,7 @@ class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
 		output string					why
 	);
 
-	// 只读状态查询与明确 W1C 清除保持独立，不隐含写入配置表。
+	// PBA 为只读：读整个 64 位值，容量不从结构体宽度推断；只读查询与 W1C 清除相互独立。
 	extern task read_msix_pba(
 		input dpu_state_query_t		item,
 		output dpu_msix_pba_word_t	value,
@@ -527,7 +493,7 @@ class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
 		output string				why
 	);
 
-	// 状态 hook 前核对冻结上下文，不允许 caller 将初始化表伪装成只读状态。
+	// 状态读取前核对冻结上下文，不允许把初始化表伪装成只读状态。
 	extern task read_msix_stat(
 		input dpu_state_query_t	item,
 		output dpu_msix_stat_t	value,
@@ -535,7 +501,6 @@ class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
 		output string			why
 	);
 
-	// 状态 hook 前核对冻结上下文，不允许 caller 将初始化表伪装成只读状态。
 	extern task read_pfvf_drop_status(
 		input dpu_state_query_t			item,
 		output dpu_pfvf_drop_status_t	value,
@@ -550,7 +515,7 @@ class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
 		output string					why
 	);
 
-	// 平台可按寄存器语义覆写；未实现不得返回伪造状态。
+	// 平台按寄存器语义覆写以下状态读取 hook；未实现时不得返回伪造状态。
 	extern virtual task user_read_msix_stat(
 		input dpu_state_query_t	item,
 		output dpu_msix_stat_t	value,
@@ -558,7 +523,6 @@ class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
 		output string			why
 	);
 
-	// 平台可按寄存器语义覆写；未实现不得返回伪造状态。
 	extern virtual task user_read_pfvf_drop_status(
 		input dpu_state_query_t			item,
 		output dpu_pfvf_drop_status_t	value,
@@ -591,12 +555,10 @@ class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
 	);
 endclass
 
-// 构造 sequence 外壳，不读取参数，不访问 DUT。
 function dpu_cfg_seq::new(string	name);
 	super.new(name);
 endfunction
 
-// UVM 即使 start(..., call_pre_post=0) 也调用 pre_start，故派生 body 可直接使用 cfg。
 task dpu_cfg_seq::pre_start();
 	success              = 0;
 	error_msg            = "";
@@ -612,8 +574,6 @@ task dpu_cfg_seq::pre_start();
 	end
 endtask
 
-// 默认先声明 Host0/PF0 为 AF，再执行 BDF、所选 MSI-X 和 VIO；其余公共表独立可选。
-// 同一 seq 串行完成配置；verify_readback=1 时读回符合预期才开放业务，首次失败保留现场。
 task dpu_cfg_seq::body();
 	dpu_cfg_scope		public_scope;
 	dpu_cfg_scope		bdf_scope;
@@ -714,9 +674,6 @@ task dpu_cfg_seq::body();
 											  cfg.verify_readback), UVM_LOW)
 endtask
 
-// 通过真实 Host0 RC 先写 magic，再同步读一次4B状态；必须返回8才允许后续表配置。
-// 状态寄存器不按写入值比较，只关闭该次读的 RAM 数据比较；Completion 失败仍原样上传。
-// 不受 configure_public/verify_readback 控制，不轮询、不执行驱动其余 Host-ID 流程。
 task dpu_cfg_seq::declare_af(
 	output bit		ok,
 	output string	why
@@ -726,8 +683,6 @@ task dpu_cfg_seq::declare_af(
 	read_af_status(ok, why);
 endtask
 
-// 首次声明和每100笔完整DWORD配置写复用同一同步状态读；真实Completion返回前不能继续写。
-// 只有该读跳过 RAM 写值比较；单次值不为8或传输失败立即终止，不插固定延迟或额外尾读。
 task dpu_cfg_seq::read_af_status(
 	output bit		ok,
 	output string	why
@@ -747,14 +702,12 @@ task dpu_cfg_seq::read_af_status(
 	writes_since_af_read = 0;
 endtask
 
-// 失败在 start 返回前显式报告；AIP 无需理解自定义 success 字段也能看见错误。
 task dpu_cfg_seq::post_start();
 	if (!success) begin
 		`uvm_fatal("PROJECT_CONFIG_SEQ", error_msg == "" ? "DUT configuration failed" : error_msg)
 	end
 endtask
 
-// 给首个错误加执行阶段，保留底层地址/字段/Completion 原因以便定位。
 function bit dpu_cfg_seq::completed_step(
 	input string	step,
 	input bit		ok
@@ -766,7 +719,6 @@ function bit dpu_cfg_seq::completed_step(
 	return ok;
 endfunction
 
-// 只调用本类别的完整预检与执行，不串联其他配置入口。
 task dpu_cfg_seq::configure_bar_table(
 	input dpu_cfg_scope	scope,
 	output bit			ok,
@@ -777,7 +729,6 @@ task dpu_cfg_seq::configure_bar_table(
 	configure_public(kinds, scope, ok, why);
 endtask
 
-// 只调用本类别的完整预检与执行，不串联其他配置入口。
 task dpu_cfg_seq::configure_af(
 	input dpu_cfg_scope	scope,
 	output bit			ok,
@@ -788,7 +739,6 @@ task dpu_cfg_seq::configure_af(
 	configure_public(kinds, scope, ok, why);
 endtask
 
-// 只调用本类别的完整预检与执行，不串联其他配置入口。
 task dpu_cfg_seq::configure_pf_vf_map(
 	input dpu_cfg_scope	scope,
 	output bit			ok,
@@ -799,7 +749,6 @@ task dpu_cfg_seq::configure_pf_vf_map(
 	configure_public(kinds, scope, ok, why);
 endtask
 
-// 只调用本类别的完整预检与执行，不串联其他配置入口。
 task dpu_cfg_seq::configure_bdf_table(
 	input dpu_cfg_scope	scope,
 	output bit			ok,
@@ -810,7 +759,6 @@ task dpu_cfg_seq::configure_bdf_table(
 	configure_public(kinds, scope, ok, why);
 endtask
 
-// 只调用本类别的完整预检与执行，不串联其他配置入口。
 task dpu_cfg_seq::configure_completion_bdf_table(
 	input dpu_cfg_scope	scope,
 	output bit			ok,
@@ -821,7 +769,6 @@ task dpu_cfg_seq::configure_completion_bdf_table(
 	configure_public(kinds, scope, ok, why);
 endtask
 
-// 只调用本类别的完整预检与执行，不串联其他配置入口。
 task dpu_cfg_seq::configure_tlp_prefix(
 	input dpu_cfg_scope	scope,
 	output bit			ok,
@@ -832,7 +779,6 @@ task dpu_cfg_seq::configure_tlp_prefix(
 	configure_public(kinds, scope, ok, why);
 endtask
 
-// 只调用本类别的完整预检与执行，不串联其他配置入口。
 task dpu_cfg_seq::configure_msix(
 	input dpu_cfg_scope	scope,
 	output bit			ok,
@@ -848,7 +794,6 @@ task dpu_cfg_seq::configure_msix(
 	configure_public(kinds, scope, ok, why);
 endtask
 
-// 在配置顺序中执行 MSI-X Function 使能；真实控制项由平台声明。
 task dpu_cfg_seq::enable_msix(
 	input dpu_cfg_scope	scope,
 	output bit			ok,
@@ -859,7 +804,6 @@ task dpu_cfg_seq::enable_msix(
 	configure_public(kinds, scope, ok, why);
 endtask
 
-// 只调用本类别的完整预检与执行，不串联其他配置入口。
 task dpu_cfg_seq::configure_rdma_notify(
 	input dpu_cfg_scope	scope,
 	output bit			ok,
@@ -870,7 +814,6 @@ task dpu_cfg_seq::configure_rdma_notify(
 	configure_public(kinds, scope, ok, why);
 endtask
 
-// 只调用本类别的完整预检与执行，不串联其他配置入口。
 task dpu_cfg_seq::configure_qsch_rnet(
 	input dpu_cfg_scope	scope,
 	output bit			ok,
@@ -881,8 +824,6 @@ task dpu_cfg_seq::configure_qsch_rnet(
 	configure_public(kinds, scope, ok, why);
 endtask
 
-// 每对队列只写一条排序后的有效 Notify 项；同 pair 的 TX/RX 已由 cfg 去重。
-// 首次配置前未用槽位须为图片复位无效值，本入口不初始化或读回未用槽位。
 task dpu_cfg_seq::configure_vio_notify(
 	input dpu_cfg_scope	selection,
 	output bit			ok,
@@ -893,8 +834,6 @@ task dpu_cfg_seq::configure_vio_notify(
 	configure_queues(kinds, selection, ok, why);
 endtask
 
-// 驱动的 MSI-X linear 无效行将全部非 reserved 字段置1，使空行排在查找目录尾部。
-// 完整配置只使用一张统一管理窗口的单 bank；不自动切换 bank 或写 ready 寄存器。
 task dpu_cfg_seq::process_msix_tail(
 	input bit		verify,
 	output bit		ok,
@@ -942,7 +881,6 @@ task dpu_cfg_seq::process_msix_tail(
 	why = "";
 endtask
 
-// 本批次共享项按真实表地址去重，调用前完成全部 scope 预检。
 task dpu_cfg_seq::configure_qsch(
 	input dpu_cfg_scope	selection,
 	output bit			ok,
@@ -964,8 +902,6 @@ task dpu_cfg_seq::configure_qsch(
 	configure_queues(kinds, selection, ok, why);
 endtask
 
-// 从实际 Q2TC 目标解析管理 BAR；同一窗口仅写一次模式，所有值均由 cfg 参数提供。
-// mode 的 VNET/ETS 关系已在 cfg 准备控制项时校验；可选读回失败不会继续使能队列。
 task dpu_cfg_seq::configure_qsch_mode(
 	input dpu_cfg_scope	selection,
 	output bit			ok,
@@ -1007,7 +943,6 @@ task dpu_cfg_seq::configure_qsch_mode(
 	why = "";
 endtask
 
-// 本批次共享项按真实表地址去重，调用前完成全部 scope 预检。
 task dpu_cfg_seq::configure_vio_queues(
 	input dpu_cfg_scope	selection,
 	output bit			ok,
@@ -1018,7 +953,6 @@ task dpu_cfg_seq::configure_vio_queues(
 	configure_queues(kinds, selection, ok, why);
 endtask
 
-// 平台控制语义未定义；用户实现后才能报告成功，不自动调用旧 reset/init。
 task dpu_cfg_seq::user_prepare_device(
 	input dpu_control_cfg_t	item,
 	output bit				ok,
@@ -1028,7 +962,6 @@ task dpu_cfg_seq::user_prepare_device(
 	why = "required user_prepare_device is not implemented";
 endtask
 
-// 平台控制语义未定义；用户实现后才能报告成功，不自动调用旧 reset/init。
 task dpu_cfg_seq::user_configure_af(
 	input dpu_control_cfg_t	item,
 	output bit				ok,
@@ -1038,7 +971,6 @@ task dpu_cfg_seq::user_configure_af(
 	why = "required user_configure_af is not implemented";
 endtask
 
-// 平台控制语义未定义；用户实现后才能报告成功，不自动调用旧 reset/init。
 task dpu_cfg_seq::user_configure_msix_control_entry(
 	input dpu_control_cfg_t	item,
 	output bit				ok,
@@ -1048,7 +980,6 @@ task dpu_cfg_seq::user_configure_msix_control_entry(
 	why = "required user_configure_msix_control_entry is not implemented";
 endtask
 
-// 平台控制语义未定义；用户实现后才能报告成功，不自动调用旧 reset/init。
 task dpu_cfg_seq::user_configure_msix_function(
 	input dpu_control_cfg_t	item,
 	output bit				ok,
@@ -1058,7 +989,6 @@ task dpu_cfg_seq::user_configure_msix_function(
 	why = "required user_configure_msix_function is not implemented";
 endtask
 
-// 平台控制语义未定义；用户实现后才能报告成功，不自动调用旧 reset/init。
 task dpu_cfg_seq::user_quiesce_device(
 	input dpu_control_cfg_t	item,
 	output bit				ok,
@@ -1068,7 +998,6 @@ task dpu_cfg_seq::user_quiesce_device(
 	why = "required user_quiesce_device is not implemented";
 endtask
 
-// 平台控制语义未定义；用户实现后才能报告成功，不自动调用旧 reset/init。
 task dpu_cfg_seq::user_reset_device(
 	input dpu_control_cfg_t	item,
 	output bit				ok,
@@ -1078,7 +1007,6 @@ task dpu_cfg_seq::user_reset_device(
 	why = "required user_reset_device is not implemented";
 endtask
 
-// 用户显式验证平台行为；默认失败，不以 posted send 代替设备确认。
 task dpu_cfg_seq::user_configure_bar_mapping_entry(
 	input dpu_bar_mapping_cfg_t	item,
 	output bit					ok,
@@ -1088,7 +1016,6 @@ task dpu_cfg_seq::user_configure_bar_mapping_entry(
 	why = "required user_configure_bar_mapping_entry is not implemented";
 endtask
 
-// 用户显式验证平台行为；默认失败，不以 posted send 代替设备确认。
 task dpu_cfg_seq::user_verify_dpu_configuration(
 	input dpu_cfg_scope	scope,
 	output bit			ok,
@@ -1098,9 +1025,6 @@ task dpu_cfg_seq::user_verify_dpu_configuration(
 	why = "required user_verify_dpu_configuration is not implemented";
 endtask
 
-// 读回实际配置表，而非共享 data staging 端口；使能后的队列表按 enable 位更新期望值。
-// 当前初始化尚未发 Notify，ring 不应运行；自清零/只写的项目寄存器可覆写此验证方法。
-// 读失败或任一有效位不符都阻止 commit，不把 posted 发送成功视为设备已应用。
 task dpu_cfg_seq::user_verify_vio_configuration(
 	input dpu_cfg_scope	selection,
 	output bit			ok,
@@ -1160,7 +1084,6 @@ task dpu_cfg_seq::user_verify_vio_configuration(
 	why = "";
 endtask
 
-// 全部四态检查在两态 registry/sequence 转换前执行，保留小端 byte lane 和 skip-mask 语义。
 task dpu_cfg_seq::mmio(
 	input dpu_bar_target_t	target,
 	input bit				writing,
@@ -1209,7 +1132,6 @@ task dpu_cfg_seq::mmio(
 	end
 endtask
 
-// Function+真实 BAR 查找，offset 永远相对所选 BAR；失败不回退默认窗口。
 task dpu_cfg_seq::pcie_bar_write(
 	input dpu_function_key_t	owner,
 	input int unsigned			bar_id,
@@ -1232,7 +1154,6 @@ task dpu_cfg_seq::pcie_bar_write(
 	mmio(target, 1, offset, length, data, byte_skip_mask, ignored, ok, why);
 endtask
 
-// 读 Completion 的失败和短数据由底层 sequence 明确上传，不把默认零当成功。
 task dpu_cfg_seq::pcie_bar_read(
 	input dpu_function_key_t	owner,
 	input int unsigned			bar_id,
@@ -1255,7 +1176,6 @@ task dpu_cfg_seq::pcie_bar_read(
 	mmio(target, 0, offset, length, '0, byte_skip_mask, data, ok, why);
 endtask
 
-// 手动路径无隐含 Host，多个 Host 时必须写完整 h 前缀。
 task dpu_cfg_seq::pcie_bar_write_by_name(
 	input string		name,
 	input logic [63:0]	offset,
@@ -1277,8 +1197,6 @@ task dpu_cfg_seq::pcie_bar_write_by_name(
 	mmio(target, 1, offset, length, data, byte_skip_mask, ignored, ok, why);
 endtask
 
-// 解析用户选择的真实 BAR 后逐 DWORD 写完整表项；不改变 cfg 中已生成的 typed 表项。
-// 地址是 BAR 内偏移；不自动读回或触发间接控制，失败保留已发出的 posted 写。
 task dpu_cfg_seq::pcie_table_write_by_name(
 	input string		name,
 	input logic [63:0]	offset,
@@ -1303,9 +1221,6 @@ task dpu_cfg_seq::pcie_table_write_by_name(
 	write_table_dwords(target, offset, length, data, ok, why);
 endtask
 
-// 表项最多 128 bit，每次仅发 32 bit，高位放高地址；不反转 DWORD 内字节。
-// 第一笔前检查整项宽度、已知值、BAR 和 4KB 范围；任何发送失败立即返回。
-// 单个配置 sequence 顺序调用；本层返回后调用者才发送 clear/trigger。
 task dpu_cfg_seq::write_table_dwords(
 	input dpu_bar_target_t	target,
 	input logic [63:0]		offset,
@@ -1350,7 +1265,6 @@ task dpu_cfg_seq::write_table_dwords(
 	end
 endtask
 
-// 名字解析与实际 Function API 复用同一个范围/格式检查。
 task dpu_cfg_seq::pcie_bar_read_by_name(
 	input string			name,
 	input logic [63:0]		offset,
@@ -1372,7 +1286,6 @@ task dpu_cfg_seq::pcie_bar_read_by_name(
 	mmio(target, 0, offset, length, '0, byte_skip_mask, data, ok, why);
 endtask
 
-// 有界显式轮询；比较 mask 与 byte skip-mask 是不同概念，不在后台自动读状态。
 task dpu_cfg_seq::pcie_poll_bar(
 	input dpu_function_key_t	owner,
 	input int unsigned			bar_id,
@@ -1400,9 +1313,6 @@ task dpu_cfg_seq::pcie_poll_bar(
 	why = "BAR poll exhausted attempts";
 endtask
 
-// 检查表项绑定与字段宽度；仅 enabling 改变声明的 enable/mask 位。
-// 单个配置 sequence 按顺序调用，VTX/VRX 不插入其他表访问。
-// 每项先高到低逐 DWORD 写；VTX/VRX 的四笔数据全部成功后才发 clear/trigger。
 task dpu_cfg_seq::checked_write(
 	input dpu_table_item_t	record,
 	input logic [127:0]		value,
@@ -1462,7 +1372,6 @@ task dpu_cfg_seq::checked_write(
 	end
 endtask
 
-// bdf typed 写入口检查全部关联，随后复用唯一逐 DWORD 写入实现。
 task dpu_cfg_seq::write_bdf(
 	input dpu_bdf_cfg_t	item,
 	output bit			ok,
@@ -1483,7 +1392,6 @@ task dpu_cfg_seq::write_bdf(
 	checked_write(r, 128'(item.entry), 0, ok, why);
 endtask
 
-// completion_bdf typed 写入口检查全部关联，随后复用唯一逐 DWORD 写入实现。
 task dpu_cfg_seq::write_completion_bdf(
 	input dpu_completion_bdf_cfg_t	item,
 	output bit						ok,
@@ -1505,7 +1413,6 @@ task dpu_cfg_seq::write_completion_bdf(
 	checked_write(r, 128'(item.entry), 0, ok, why);
 endtask
 
-// pfvf typed 写入口检查全部关联，随后复用唯一逐 DWORD 写入实现。
 task dpu_cfg_seq::write_pfvf(
 	input dpu_pfvf_cfg_t	item,
 	output bit				ok,
@@ -1526,7 +1433,6 @@ task dpu_cfg_seq::write_pfvf(
 	checked_write(r, 128'(item.entry), 0, ok, why);
 endtask
 
-// tlp_prefix typed 写入口检查全部关联，随后复用唯一逐 DWORD 写入实现。
 task dpu_cfg_seq::write_tlp_prefix(
 	input dpu_tlp_prefix_cfg_t	item,
 	output bit					ok,
@@ -1547,7 +1453,6 @@ task dpu_cfg_seq::write_tlp_prefix(
 	checked_write(r, 128'(item.entry), 0, ok, why);
 endtask
 
-// msix_linear typed 写入口检查全部关联，随后复用唯一逐 DWORD 写入实现。
 task dpu_cfg_seq::write_msix_linear(
 	input dpu_msix_linear_cfg_t	item,
 	output bit					ok,
@@ -1568,7 +1473,6 @@ task dpu_cfg_seq::write_msix_linear(
 	checked_write(r, 128'(item.entry), 0, ok, why);
 endtask
 
-// msix_info typed 写入口检查全部关联，随后复用唯一逐 DWORD 写入实现。
 task dpu_cfg_seq::write_msix_info(
 	input dpu_msix_info_cfg_t	item,
 	output bit					ok,
@@ -1589,7 +1493,6 @@ task dpu_cfg_seq::write_msix_info(
 	checked_write(r, 128'(item.entry), 0, ok, why);
 endtask
 
-// msix_interval typed 写入口检查全部关联，随后复用唯一逐 DWORD 写入实现。
 task dpu_cfg_seq::write_msix_interval(
 	input dpu_msix_interval_cfg_t	item,
 	output bit						ok,
@@ -1611,7 +1514,6 @@ task dpu_cfg_seq::write_msix_interval(
 	checked_write(r, 128'(item.entry), 0, ok, why);
 endtask
 
-// msix_table typed 写入口检查全部关联，随后复用唯一逐 DWORD 写入实现。
 task dpu_cfg_seq::write_msix_table(
 	input dpu_msix_table_cfg_t	item,
 	output bit					ok,
@@ -1632,7 +1534,6 @@ task dpu_cfg_seq::write_msix_table(
 	checked_write(r, 128'(item.entry), 0, ok, why);
 endtask
 
-// qsch_q2tc typed 写入口检查全部关联，随后复用唯一逐 DWORD 写入实现。
 task dpu_cfg_seq::write_qsch_q2tc(
 	input dpu_qsch_q2tc_cfg_t	item,
 	output bit					ok,
@@ -1653,7 +1554,6 @@ task dpu_cfg_seq::write_qsch_q2tc(
 	checked_write(r, 128'(item.entry), 0, ok, why);
 endtask
 
-// qsch_n2g typed 写入口检查全部关联，随后复用唯一逐 DWORD 写入实现。
 task dpu_cfg_seq::write_qsch_n2g(
 	input dpu_qsch_n2g_cfg_t	item,
 	output bit					ok,
@@ -1674,7 +1574,6 @@ task dpu_cfg_seq::write_qsch_n2g(
 	checked_write(r, 128'(item.entry), 0, ok, why);
 endtask
 
-// qsch_g2p typed 写入口检查全部关联，随后复用唯一逐 DWORD 写入实现。
 task dpu_cfg_seq::write_qsch_g2p(
 	input dpu_qsch_g2p_cfg_t	item,
 	output bit					ok,
@@ -1695,7 +1594,6 @@ task dpu_cfg_seq::write_qsch_g2p(
 	checked_write(r, 128'(item.entry), 0, ok, why);
 endtask
 
-// rdma_notify typed 写入口检查全部关联，随后复用唯一逐 DWORD 写入实现。
 task dpu_cfg_seq::write_rdma_notify(
 	input dpu_rdma_notify_cfg_t	item,
 	output bit					ok,
@@ -1716,7 +1614,6 @@ task dpu_cfg_seq::write_rdma_notify(
 	checked_write(r, 128'(item.entry), 0, ok, why);
 endtask
 
-// qsch_rnet typed 写入口检查全部关联，随后复用唯一逐 DWORD 写入实现。
 task dpu_cfg_seq::write_qsch_rnet(
 	input dpu_qsch_rnet_cfg_t	item,
 	output bit					ok,
@@ -1737,7 +1634,6 @@ task dpu_cfg_seq::write_qsch_rnet(
 	checked_write(r, 128'(item.entry), 0, ok, why);
 endtask
 
-// vtx typed 写入口检查全部关联，随后复用唯一逐 DWORD 写入实现。
 task dpu_cfg_seq::write_vtx(
 	input dpu_vtx_cfg_t	item,
 	output bit			ok,
@@ -1755,7 +1651,6 @@ task dpu_cfg_seq::write_vtx(
 	checked_write(r, 128'(item.entry), 0, ok, why);
 endtask
 
-// vrx typed 写入口检查全部关联，随后复用唯一逐 DWORD 写入实现。
 task dpu_cfg_seq::write_vrx(
 	input dpu_vrx_cfg_t	item,
 	output bit			ok,
@@ -1773,7 +1668,6 @@ task dpu_cfg_seq::write_vrx(
 	checked_write(r, 128'(item.entry), 0, ok, why);
 endtask
 
-// vio_notify typed 写入口检查全部关联，随后复用唯一逐 DWORD 写入实现。
 task dpu_cfg_seq::write_vio_notify(
 	input dpu_vio_notify_cfg_t	item,
 	output bit					ok,
@@ -1791,7 +1685,6 @@ task dpu_cfg_seq::write_vio_notify(
 	checked_write(r, 128'(item.entry), 0, ok, why);
 endtask
 
-// 唯一 typed dispatch；不在单项 hook 中复制外围循环，也不隐含执行其他类别。
 task dpu_cfg_seq::dispatch_record(
 	input dpu_table_item_t	record,
 	output bit				ok,
@@ -1979,7 +1872,6 @@ task dpu_cfg_seq::dispatch_record(
 	endcase
 endtask
 
-// 公共控制 hook 可复用同一 checked 路径；mask 和消费者也必须匹配原件。
 task dpu_cfg_seq::write_control(
 	input dpu_control_cfg_t	item,
 	output bit				ok,
@@ -1999,7 +1891,6 @@ task dpu_cfg_seq::write_control(
 	checked_write(r, item.value, 0, ok, why);
 endtask
 
-// 辅助项有实际 ring 绑定，不能借控制 payload 修改另一个 pair。
 task dpu_cfg_seq::write_queue_aux(
 	input dpu_queue_control_cfg_t	item,
 	output bit						ok,
@@ -2019,7 +1910,6 @@ task dpu_cfg_seq::write_queue_aux(
 	checked_write(r, item.value, 0, ok, why);
 endtask
 
-// 先生成全部公共表项，再复用统一发送路径；生成失败时不写任何表项。
 task dpu_cfg_seq::configure_public(
 	input dpu_table_kind_e	kinds[$],
 	input dpu_cfg_scope		scope,
@@ -2037,7 +1927,6 @@ task dpu_cfg_seq::configure_public(
 	write_records(batch, ok, why);
 endtask
 
-// 按实际 service/qpair 生成批次；共享项去重和后置使能由统一路径处理。
 task dpu_cfg_seq::configure_queues(
 	input dpu_table_kind_e	kinds[$],
 	input dpu_cfg_scope		selection,
@@ -2051,7 +1940,6 @@ task dpu_cfg_seq::configure_queues(
 	write_records(batch, ok, why);
 endtask
 
-// 首笔表写前校验使能范围；空批次不写，任何表项失败都不发送本批使能。
 task dpu_cfg_seq::write_records(
 	input dpu_table_item_t	batch[$],
 	output bit				ok,
@@ -2092,7 +1980,6 @@ task dpu_cfg_seq::write_records(
 	why = "";
 endtask
 
-// 使用相同 PCIe/AF 同步路径写完整 DWORD；不新增读回、轮询或使能开关。
 task dpu_cfg_seq::enable_notify(
 	input dpu_bar_target_t	target,
 	output bit				ok,
@@ -2103,7 +1990,6 @@ task dpu_cfg_seq::enable_notify(
 	mmio(target, 1, 64'h0008_0044, 4, 128'h1, 0, unused_readback, ok, why);
 endtask
 
-// 写表完成后逐队列使能；平台 task 返回失败时不再处理下一条队列。
 task dpu_cfg_seq::enable_vio_queues(
 	input dpu_cfg_scope	selection,
 	output bit			ok,
@@ -2129,7 +2015,6 @@ task dpu_cfg_seq::enable_vio_queues(
 	why = "";
 endtask
 
-// 公共配置写完后交由平台读回或检查状态；不将 posted 发送完成当成硬件生效。
 task dpu_cfg_seq::verify_dpu_configuration(
 	input dpu_cfg_scope	scope,
 	output bit			ok,
@@ -2143,9 +2028,6 @@ task dpu_cfg_seq::verify_dpu_configuration(
 	user_verify_dpu_configuration(scope, ok, why);
 endtask
 
-// BDF 与 MSI-X 已从其他公共配置独立；可选读回只覆盖本次真正选中的数据表。
-// 空 scope 表示该类别未执行，不能构造空 Function 列表来意外验证全部 Function。
-// 每条记录按实际 BAR 和宽度读取；任一不符立即返回，不使能后续 VIO 队列。
 task dpu_cfg_seq::verify_function_configuration(
 	input dpu_cfg_scope	bdf_scope,
 	input dpu_cfg_scope	msix_scope,
@@ -2193,7 +2075,6 @@ task dpu_cfg_seq::verify_function_configuration(
 	why = "";
 endtask
 
-// 队列配置写完后执行平台验证；成功后默认 body 才调用 commit_queues。
 task dpu_cfg_seq::verify_vio_configuration(
 	input dpu_cfg_scope	selection,
 	output bit			ok,
@@ -2205,7 +2086,6 @@ task dpu_cfg_seq::verify_vio_configuration(
 	user_verify_vio_configuration(selection, ok, why);
 endtask
 
-// queue enable 只能更新已声明的 enable 位，仅改变平台声明的 enable 位。
 task dpu_cfg_seq::write_enabled_queue(
 	input dpu_queue_control_cfg_t	item,
 	output bit						ok,
@@ -2226,7 +2106,6 @@ task dpu_cfg_seq::write_enabled_queue(
 	checked_write(r, item.value, 1, ok, why);
 endtask
 
-// PBA 是只读字；读取整个64位值，不把总容量从结构体宽度推断出来。
 task dpu_cfg_seq::read_msix_pba(
 	input dpu_state_query_t		item,
 	output dpu_msix_pba_word_t	value,
@@ -2250,7 +2129,6 @@ task dpu_cfg_seq::read_msix_pba(
 	if (ok) value.pending = data[63:0];
 endtask
 
-// 状态 hook 前核对冻结上下文，不允许 caller 将初始化表伪装成只读状态。
 task dpu_cfg_seq::read_msix_stat(
 	input dpu_state_query_t	item,
 	output dpu_msix_stat_t	value,
@@ -2272,7 +2150,6 @@ task dpu_cfg_seq::read_msix_stat(
 	user_read_msix_stat(item, value, ok, why);
 endtask
 
-// 平台可按寄存器语义覆写；未实现不得返回伪造状态。
 task dpu_cfg_seq::user_read_msix_stat(
 	input dpu_state_query_t	item,
 	output dpu_msix_stat_t	value,
@@ -2284,7 +2161,6 @@ task dpu_cfg_seq::user_read_msix_stat(
 	why   = "required user_read_msix_stat is not implemented";
 endtask
 
-// 状态 hook 前核对冻结上下文，不允许 caller 将初始化表伪装成只读状态。
 task dpu_cfg_seq::read_pfvf_drop_status(
 	input dpu_state_query_t			item,
 	output dpu_pfvf_drop_status_t	value,
@@ -2306,7 +2182,6 @@ task dpu_cfg_seq::read_pfvf_drop_status(
 	user_read_pfvf_drop_status(item, value, ok, why);
 endtask
 
-// 平台可按寄存器语义覆写；未实现不得返回伪造状态。
 task dpu_cfg_seq::user_read_pfvf_drop_status(
 	input dpu_state_query_t			item,
 	output dpu_pfvf_drop_status_t	value,
@@ -2318,7 +2193,6 @@ task dpu_cfg_seq::user_read_pfvf_drop_status(
 	why   = "required user_read_pfvf_drop_status is not implemented";
 endtask
 
-// 显式 clear_mask 与状态值类型隔离；未知态、错误目标在用户 hook 前拒绝。
 task dpu_cfg_seq::clear_pfvf_drop_status(
 	input dpu_pfvf_drop_clear_cfg_t	item,
 	output bit						ok,
@@ -2338,7 +2212,6 @@ task dpu_cfg_seq::clear_pfvf_drop_status(
 	user_clear_pfvf_drop_status(item, ok, why);
 endtask
 
-// 清除由用户显式执行；不把读出的 status 自动回写。
 task dpu_cfg_seq::user_clear_pfvf_drop_status(
 	input dpu_pfvf_drop_clear_cfg_t	item,
 	output bit						ok,
@@ -2348,7 +2221,6 @@ task dpu_cfg_seq::user_clear_pfvf_drop_status(
 	why = "required user_clear_pfvf_drop_status is not implemented";
 endtask
 
-// 无 VIO 的独立公共配置只执行公共表；VIO 派生类填充实际队列选择。
 task dpu_cfg_seq::prepare_queues(
 	output bit		ok,
 	output string	why
@@ -2358,7 +2230,6 @@ task dpu_cfg_seq::prepare_queues(
 	why       = "";
 endtask
 
-// 公共基类没有 ring 可确认；具体消费者仅在所有写入成功后确认。
 function void dpu_cfg_seq::commit_queues(
 	output bit		ok,
 	output string	why
@@ -2367,7 +2238,6 @@ function void dpu_cfg_seq::commit_queues(
 	why = "";
 endfunction
 
-// 不复制 RC 路由或地址，只借用 DPU cfg 中同一个 BAR map 的 PCIe 扩展。
 function bit dpu_cfg_seq::get_rc(
 	input dpu_bar_target_t				target,
 	output uvm_sequencer#(pcie_tl_tlp)	sequencer,

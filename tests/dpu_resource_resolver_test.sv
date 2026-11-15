@@ -601,9 +601,8 @@ class dpu_resource_resolver_test extends uvm_test;
             `uvm_fatal("RESOURCE_RESOLVER", "resolved qpair binding disagrees with allocation contract")
     endfunction
 
-    // The software Virtio pair ordinal is independent from the DUT's local
-    // qpair index.  A sparse hardware placement must not create sparse PCI
-    // virtqueue IDs: the first software pair still owns RX=0/TX=1.
+    // The software Virtio pair ordinal is independent of the DUT local qpair index: a sparse hardware
+    // placement must not create sparse virtqueue IDs (the first software pair still owns RX=0/TX=1).
     function void test_protocol_pair_index_is_independent_of_local_id();
         dpu_service_key_t service_key;
         dpu_device_snapshot device_snapshot;

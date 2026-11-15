@@ -1,17 +1,7 @@
-/*
- * 所属层次：src/ DUT 能力描述层。
- * 文件职责：集中保存 BAR profile 与资源/编码上限，供解析、VIO 行为及公共表校验复用。
- * 主要依赖：dpu_device_types、dpu_resource_types。
- * 参数入口：load_params 显式读取 AIP，不在构造/复制中读取。
- * 加载边界：只更新 authoring 输入；拓扑创建、完整校验、快照冻结仍由调用方负责。
- * 所有权与生命周期：能力对象由调用方创建并可复制；查询接口不能反向修改能力配置。
- */
+// DUT 能力描述：BAR profile 与资源/编码上限，供解析、VIO 行为及公共表校验复用。
 `ifndef DPU_DUT_CAPS_SV
 `define DPU_DUT_CAPS_SV
 
-// 设计原因：将相关值和操作约束集中在独立边界，避免跨模块重复解释同一契约。
-// 职责与所有权：对象/类型按值语义管理自身字段，不隐式取得外部资源或生命周期控制权。
-// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_dut_caps extends uvm_object;
     `uvm_object_utils(dpu_dut_caps)
 
@@ -20,11 +10,8 @@ class dpu_dut_caps extends uvm_object;
     int unsigned max_vfs_per_pf;
     int unsigned max_functions;
     int unsigned global_msix_vector_count;
-    // Interrupt resources which the real driver reserves after the LAN
-    // vectors for each active function.  AF additionally owns the extra
-    // control/message vectors; keeping these in capabilities makes the
-    // resource snapshot explicit instead of hiding the accounting in the
-    // register-plan builder.
+    // Interrupt vectors the real driver reserves after each active function's LAN vectors (AF also
+    // owns extra control/message vectors); kept here so the resource snapshot accounts for them explicitly.
     int unsigned mailbox_msix_vectors;
     int unsigned af_extra_msix_vectors;
     int unsigned af_extra_queue_count;
@@ -33,9 +20,6 @@ class dpu_dut_caps extends uvm_object;
     int unsigned vio_notify_entries_per_bank;
     dpu_bar_profile_t bar_profiles[$];
 
-// 功能：向对象加入配置项、绑定或寄存器操作（add_bar_profile）。
-// 输入/输出：输入为待加入值；成功返回 1/无返回值，失败返回 why 或记录诊断。
-// 边界/副作用：加入前检查重复键、所有权和冻结状态，失败不得留下半写入元素。
     protected function void add_bar_profile(
         input dpu_function_kind_e kind,
         input dpu_bar_role_e role,
@@ -53,9 +37,6 @@ class dpu_dut_caps extends uvm_object;
         bar_profiles.push_back(profile);
     endfunction
 
-// 功能：构造并初始化对象（new）。
-// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
-// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_dut_caps");
         super.new(name);
         max_hosts = 2;
@@ -88,9 +69,6 @@ class dpu_dut_caps extends uvm_object;
                         64'h0000_0000_0000_8000, 64'h0000_0000_0000_8000);
     endfunction
 
-// 功能：把源对象的配置或结果深拷贝到当前对象（copy_from）。
-// 输入/输出：输入为同型 rhs；无返回值，动态数组按值复制。
-// 边界/副作用：调用方仍拥有 rhs；空源或类型不符时拒绝，避免共享可变引用。
     function void copy_from(input dpu_dut_caps rhs);
         max_hosts = rhs.max_hosts;
         max_pfs_per_host = rhs.max_pfs_per_host;
@@ -108,9 +86,6 @@ class dpu_dut_caps extends uvm_object;
             bar_profiles.push_back(rhs.bar_profiles[index]);
     endfunction
 
-// 功能：按键查询内部索引或导出值复制（lookup_bar_profile）。
-// 输入/输出：输入为逻辑键/索引和 output/ref 参数；返回命中状态或查询值。
-// 边界/副作用：查询不改变冻结状态；未命中时返回明确失败而不伪造结果。
     function bit lookup_bar_profile(
         input dpu_function_kind_e kind,
         input dpu_bar_role_e role,
@@ -135,9 +110,6 @@ class dpu_dut_caps extends uvm_object;
         return 0;
     endfunction
 
-// 功能：校验对象字段之间的约束和跨字段不变量（validate）。
-// 输入/输出：输入为当前对象状态；返回 bit，并在 why 中给出首个失败原因。
-// 边界/副作用：只读检查；空键、越界、重复项或不一致组合必须拒绝。
     function bit validate(output string why);
         why = "";
         if (max_hosts == 0) begin
@@ -250,11 +222,6 @@ class dpu_dut_caps extends uvm_object;
         return 1;
     endfunction
 
-    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
-    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
-    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
-    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
-    // 重复调用表示显式重新抽样，调用方应控制调用次数。
     function void load_params(string	path = "dpu.caps");
         begin
             int unsigned	max_hosts;

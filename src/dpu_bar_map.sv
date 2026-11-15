@@ -1,4 +1,4 @@
-// src：冻结 BAR 租约的唯一查询视图，不依赖 PCIe/VIO，不分配资源。
+// 冻结 BAR 租约的唯一查询视图，不依赖 PCIe/VIO，不分配资源。
 // 对象借用 DPU snapshot；initialize 后建立值目录，freeze 后只读，目标与发布校验保留同一快照身份。
 typedef struct {
 	dpu_function_key_t		function_key;
@@ -18,7 +18,6 @@ class dpu_bar_map extends uvm_object;
 	protected dpu_bar_target_t		m_targets[$];
 	protected static bit			m_auto_printed[string];
 
-	// 创建空对象；调用 initialize 前任何查询/绑定都失败。
 	extern function new(string	name = "dpu_bar_map");
 
 	// 借用冻结快照，generation 由发布方提供且非零；禁止二次初始化。
@@ -31,7 +30,6 @@ class dpu_bar_map extends uvm_object;
 	// 冻结实际 BAR 目录；核心不依赖 PCIe 路由，发送前由 PCIe 集成层检查绑定。
 	extern virtual function bit freeze(output string	why);
 
-	// 判断生命周期；不给调用方可写内部容器。
 	extern function bit is_frozen();
 
 	// 发布前核对借用的设备身份；只接受冻结目录与同一非空快照，不导出可写句柄。
@@ -72,8 +70,7 @@ class dpu_bar_map extends uvm_object;
 		output string		why
 	);
 
-	// 一次输出按 Host/Function 分组的地址清单，共享身份不逐 BAR 重复；不展开内部结构体。
-	// 保留冻结时的稳定顺序与自动去重语义，手工调用可重复查看同一份资源。
+	// 按 Host/Function 分组输出地址清单（共享身份不逐 BAR 重复），顺序与去重沿用冻结结果。
 	extern function bit print_bar_map(
 		output string	why,
 		input bit		automatic_print = 0
@@ -97,12 +94,10 @@ class dpu_bar_map extends uvm_object;
 	);
 endclass
 
-// 创建空对象；调用 initialize 前任何查询/绑定都失败。
 function dpu_bar_map::new(string	name = "dpu_bar_map");
 	super.new(name);
 endfunction
 
-// 借用冻结快照，generation 由发布方提供且非零；禁止二次初始化。
 function bit dpu_bar_map::initialize(
 	dpu_device_snapshot	snapshot,
 	longint unsigned	generation,
@@ -124,7 +119,6 @@ function bit dpu_bar_map::initialize(
 	return 1;
 endfunction
 
-// 冻结实际 BAR 目录；核心不依赖 PCIe 路由，发送前由 PCIe 集成层检查绑定。
 function bit dpu_bar_map::freeze(output string	why);
 	dpu_function_key_t	keys[$];
 	dpu_bar_target_t	pending[$];
@@ -184,17 +178,14 @@ function bit dpu_bar_map::freeze(output string	why);
 	return 1;
 endfunction
 
-// 判断生命周期；不给调用方可写内部容器。
 function bit dpu_bar_map::is_frozen();
 	return m_frozen;
 endfunction
 
-// 发布前核对借用的设备身份；只接受冻结目录与同一非空快照，不导出可写句柄。
 function bit dpu_bar_map::references_device_snapshot(input dpu_device_snapshot	snapshot);
 	return m_frozen && snapshot != null && snapshot == m_snapshot;
 endfunction
 
-// 严格完整解析名字；显式前缀与访问上下文冲突时报错，无上下文只允许唯一 Host。
 function bit dpu_bar_map::resolve_name(
 	string					name,
 	output dpu_bar_target_t	target,
@@ -265,7 +256,6 @@ function bit dpu_bar_map::resolve_name(
 	return resolve_function(key, bar_id, target, why);
 endfunction
 
-// 使用完整 Function 和实际偶数 BAR ID 查询，绝不把 ID 当成 role。
 function bit dpu_bar_map::resolve_function(
 	dpu_function_key_t		key,
 	int unsigned			bar_id,
@@ -295,7 +285,6 @@ function bit dpu_bar_map::resolve_function(
 	return 0;
 endfunction
 
-// 高级调试只接受真实 base，域内须唯一；BAR 内部地址不是 base。
 function bit dpu_bar_map::resolve_base(
 	int unsigned			host_id,
 	int unsigned			segment_id,
@@ -341,7 +330,6 @@ function bit dpu_bar_map::resolve_base(
 	);
 endfunction
 
-// 校验引用身份及内容后以 65 位检查完整区间；失败地址清零，width 不可为零。
 function bit dpu_bar_map::check_range(
 	dpu_bar_target_t	target,
 	bit [63:0]			byte_offset,
@@ -389,8 +377,6 @@ function bit dpu_bar_map::check_range(
 	return 1;
 endfunction
 
-// 一次输出按 Host/Function 分组的地址清单，共享身份不逐 BAR 重复；不展开内部结构体。
-// 保留冻结时的稳定顺序与自动去重语义，手工调用可重复查看同一份资源。
 function bit dpu_bar_map::print_bar_map(
 	output string	why,
 	input bit		automatic_print = 0
@@ -473,7 +459,6 @@ function bit dpu_bar_map::print_bar_map(
 	return 1;
 endfunction
 
-// 统一状态门；只在未冻结的已初始化对象上允许构建操作。
 function bit dpu_bar_map::mutable(output string	why);
 	why = "";
 
@@ -484,7 +469,6 @@ function bit dpu_bar_map::mutable(output string	why);
 	return 1;
 endfunction
 
-// 严格消费文字 token；失败时不推进 cursor。
 function bit dpu_bar_map::consume(
 	string				name,
 	string				token,
@@ -503,7 +487,6 @@ function bit dpu_bar_map::consume(
 	return 1;
 endfunction
 
-// 逐字符十进制累积，提前检查 uint 溢出，至少要求一位数字。
 function bit dpu_bar_map::decimal(
 	string				name,
 	ref int unsigned	cursor,

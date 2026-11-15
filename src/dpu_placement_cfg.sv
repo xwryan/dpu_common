@@ -1,17 +1,9 @@
-/*
- * 所属层次：src/ VIO 放置 authoring 配置层。
- * 文件职责：声明候选过滤器、设备约束、qpair 覆盖、放置请求和诊断信息。
- * 主要依赖：dpu_device_types、dpu_placement_types、dpu_resource_types。
- * 参数入口：load_params 显式读取 AIP，不在构造/复制中读取。
- * 加载边界：只更新 authoring 输入；拓扑创建、完整校验、快照冻结仍由调用方负责。
- * 所有权与生命周期：配置对象由调用方编辑和拥有，normalizer 复制需要的字段；diagnostic 可清空复用。
- */
+// VIO 放置 authoring 配置：候选过滤、设备约束、qpair 覆盖、放置请求与诊断。
 `ifndef DPU_PLACEMENT_CFG_SV
 `define DPU_PLACEMENT_CFG_SV
 
-// 候选/固定设备使用已有 function key 的值语义，不建立 PF/VF 或绑定资源。
-// 仅显式给出集合覆盖时应用 schema；新增条目的缺省键为 h0/pf0/PF/vf0。
-// 原集合无参数时完整保留。显式重建集合后，由 load_params 和 normalizer 验证键与拓扑引用。
+// function key 集合（候选/固定设备）为值语义，不建立 PF/VF 或绑定资源；显式给出的集合是一次完整声明
+// （支持 AIP size/each/索引/compact，新条目缺省 h0/pf0/PF/vf0），无参数时保留原集合，键与拓扑引用由 load_params/normalizer 校验。
 `aip_struct_type_begin(dpu_function_key_t)
     `aip_field_int(int unsigned, host_id, 0)
     `aip_field_int(int unsigned, pf_id, 0)
@@ -19,9 +11,6 @@
     `aip_field_int(int unsigned, vf_id, 0)
 `aip_struct_type_end(dpu_function_key_t)
 
-// 设计原因：将相关值和操作约束集中在独立边界，避免跨模块重复解释同一契约。
-// 职责与所有权：对象/类型按值语义管理自身字段，不隐式取得外部资源或生命周期控制权。
-// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_vio_candidate_filter extends uvm_object;
     `uvm_object_utils(dpu_vio_candidate_filter)
 
@@ -30,16 +19,10 @@ class dpu_vio_candidate_filter extends uvm_object;
     int unsigned vf_ids[$];
     dpu_function_key_t function_keys[$];
 
-// 功能：构造并初始化对象（new）。
-// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
-// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_vio_candidate_filter");
         super.new(name);
     endfunction
 
-// 功能：把源对象的配置或结果深拷贝到当前对象（copy_from）。
-// 输入/输出：输入为同型 rhs；无返回值，动态数组按值复制。
-// 边界/副作用：调用方仍拥有 rhs；空源或类型不符时拒绝，避免共享可变引用。
     function void copy_from(input dpu_vio_candidate_filter rhs);
         host_ids = rhs.host_ids;
         parent_pf_keys = rhs.parent_pf_keys;
@@ -47,9 +30,6 @@ class dpu_vio_candidate_filter extends uvm_object;
         function_keys = rhs.function_keys;
     endfunction
 
-// 功能：实现 UVM copy 钩子，将源对象字段复制到当前对象（do_copy）。
-// 输入/输出：输入为 UVM object，先转换为同型对象；无返回值。
-// 边界/副作用：源对象保持不变；类型不兼容时拒绝复制并保留可诊断状态。
     virtual function void do_copy(uvm_object rhs);
         dpu_vio_candidate_filter typed_rhs;
 
@@ -61,11 +41,6 @@ class dpu_vio_candidate_filter extends uvm_object;
         copy_from(typed_rhs);
     endfunction
 
-    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
-    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
-    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
-    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
-    // 重复调用表示显式重新抽样，调用方应控制调用次数。
     function void load_params(string	path = "dpu");
         begin
             bit	present;
@@ -98,7 +73,6 @@ class dpu_vio_candidate_filter extends uvm_object;
             dpu_function_key_t	parent_pfs[$];
             present = aip_cmdline_query::present(path, "parent_pfs", 1);
             if (present) begin
-                // 显式集合是一次完整声明；支持 AIP size/each/索引/compact，缺省键由 schema 定义。
                 `aip_struct_queue_apply(({path, ".parent_pfs"}), dpu_function_key_t, parent_pfs)
                 foreach (parent_pfs[index]) begin
                     if (parent_pfs[index].host_id >= DPU_MAX_HOSTS ||
@@ -116,7 +90,6 @@ class dpu_vio_candidate_filter extends uvm_object;
             dpu_function_key_t	functions[$];
             present = aip_cmdline_query::present(path, "functions", 1);
             if (present) begin
-                // 显式集合是一次完整声明；支持 AIP size/each/索引/compact，缺省键由 schema 定义。
                 `aip_struct_queue_apply(({path, ".functions"}), dpu_function_key_t, functions)
                 foreach (functions[index]) begin
                     if (functions[index].host_id >= DPU_MAX_HOSTS ||
@@ -133,9 +106,6 @@ class dpu_vio_candidate_filter extends uvm_object;
 endclass : dpu_vio_candidate_filter
 
 
-// 设计原因：将相关值和操作约束集中在独立边界，避免跨模块重复解释同一契约。
-// 职责与所有权：对象/类型按值语义管理自身字段，不隐式取得外部资源或生命周期控制权。
-// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_vio_device_constraint extends uvm_object;
     `uvm_object_utils(dpu_vio_device_constraint)
 
@@ -143,27 +113,18 @@ class dpu_vio_device_constraint extends uvm_object;
     dpu_count_constraint_mode_e mode;
     int unsigned qpair_count;
 
-// 功能：构造并初始化对象（new）。
-// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
-// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_vio_device_constraint");
         super.new(name);
         mode = DPU_COUNT_EXACT;
         qpair_count = 0;
     endfunction
 
-// 功能：把源对象的配置或结果深拷贝到当前对象（copy_from）。
-// 输入/输出：输入为同型 rhs；无返回值，动态数组按值复制。
-// 边界/副作用：调用方仍拥有 rhs；空源或类型不符时拒绝，避免共享可变引用。
     function void copy_from(input dpu_vio_device_constraint rhs);
         function_key = rhs.function_key;
         mode = rhs.mode;
         qpair_count = rhs.qpair_count;
     endfunction
 
-// 功能：实现 UVM copy 钩子，将源对象字段复制到当前对象（do_copy）。
-// 输入/输出：输入为 UVM object，先转换为同型对象；无返回值。
-// 边界/副作用：源对象保持不变；类型不兼容时拒绝复制并保留可诊断状态。
     virtual function void do_copy(uvm_object rhs);
         dpu_vio_device_constraint typed_rhs;
 
@@ -175,11 +136,6 @@ class dpu_vio_device_constraint extends uvm_object;
         copy_from(typed_rhs);
     endfunction
 
-    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
-    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
-    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
-    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
-    // 重复调用表示显式重新抽样，调用方应控制调用次数。
     function void load_params(string	path = "dpu.device");
         begin
             int unsigned	host;
@@ -216,9 +172,6 @@ class dpu_vio_device_constraint extends uvm_object;
 endclass : dpu_vio_device_constraint
 
 
-// 设计原因：将相关值和操作约束集中在独立边界，避免跨模块重复解释同一契约。
-// 职责与所有权：对象/类型按值语义管理自身字段，不隐式取得外部资源或生命周期控制权。
-// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_vio_qpair_override extends uvm_object;
     `uvm_object_utils(dpu_vio_qpair_override)
 
@@ -230,9 +183,6 @@ class dpu_vio_qpair_override extends uvm_object;
     dpu_assignment_mode_e global_mode;
     int unsigned requested_global_qpair_id;
 
-// 功能：构造并初始化对象（new）。
-// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
-// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_vio_qpair_override");
         super.new(name);
         request_pair_index = 0;
@@ -243,9 +193,6 @@ class dpu_vio_qpair_override extends uvm_object;
         requested_global_qpair_id = 0;
     endfunction
 
-// 功能：把源对象的配置或结果深拷贝到当前对象（copy_from）。
-// 输入/输出：输入为同型 rhs；无返回值，动态数组按值复制。
-// 边界/副作用：调用方仍拥有 rhs；空源或类型不符时拒绝，避免共享可变引用。
     function void copy_from(input dpu_vio_qpair_override rhs);
         request_pair_index = rhs.request_pair_index;
         owner_mode = rhs.owner_mode;
@@ -256,9 +203,6 @@ class dpu_vio_qpair_override extends uvm_object;
         requested_global_qpair_id = rhs.requested_global_qpair_id;
     endfunction
 
-// 功能：实现 UVM copy 钩子，将源对象字段复制到当前对象（do_copy）。
-// 输入/输出：输入为 UVM object，先转换为同型对象；无返回值。
-// 边界/副作用：源对象保持不变；类型不兼容时拒绝复制并保留可诊断状态。
     virtual function void do_copy(uvm_object rhs);
         dpu_vio_qpair_override typed_rhs;
 
@@ -270,11 +214,6 @@ class dpu_vio_qpair_override extends uvm_object;
         copy_from(typed_rhs);
     endfunction
 
-    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
-    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
-    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
-    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
-    // 重复调用表示显式重新抽样，调用方应控制调用次数。
     function void load_params(string	path = "dpu.pair");
         begin
             int unsigned	index;
@@ -331,18 +270,14 @@ class dpu_vio_qpair_override extends uvm_object;
 endclass : dpu_vio_qpair_override
 
 
-// 设计原因：为 authoring 输入提供明确字段边界，避免调用方以散落变量表达设备约束。
-// 职责与所有权：对象由调用方创建、编辑和拥有；解析器只读取或复制字段，不接管原始配置。
-// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_vio_placement_request extends uvm_object;
     `uvm_object_utils(dpu_vio_placement_request)
 
     int unsigned request_id;
     int unsigned service_instance_id;
     int unsigned total_qpairs;
-    // Number of LAN MSI-X vectors requested for this function.  Zero keeps
-    // the driver default (one vector per qpair in this model); a smaller
-    // value models the real driver's min(online_cpus, rxq) sharing policy.
+    // LAN MSI-X vectors requested for this function: 0 keeps the driver default (one per qpair in this
+    // model); a smaller value models the real driver's min(online_cpus, rxq) sharing policy.
     int unsigned lan_msix_vectors;
     int unsigned seed;
     dpu_vio_candidate_kind_e candidate_kind;
@@ -353,9 +288,6 @@ class dpu_vio_placement_request extends uvm_object;
     dpu_vio_device_constraint device_constraints[$];
     dpu_vio_qpair_override qpair_overrides[$];
 
-// 功能：构造并初始化对象（new）。
-// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
-// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_vio_placement_request");
         super.new(name);
         request_id = 0;
@@ -370,9 +302,6 @@ class dpu_vio_placement_request extends uvm_object;
             {name, "_candidate_filter"});
     endfunction
 
-// 功能：把源对象的配置或结果深拷贝到当前对象（copy_from）。
-// 输入/输出：输入为同型 rhs；无返回值，动态数组按值复制。
-// 边界/副作用：调用方仍拥有 rhs；空源或类型不符时拒绝，避免共享可变引用。
     function void copy_from(input dpu_vio_placement_request rhs);
         dpu_vio_device_constraint constraint_copy;
         dpu_vio_qpair_override override_copy;
@@ -417,9 +346,6 @@ class dpu_vio_placement_request extends uvm_object;
         end
     endfunction
 
-// 功能：实现 UVM copy 钩子，将源对象字段复制到当前对象（do_copy）。
-// 输入/输出：输入为 UVM object，先转换为同型对象；无返回值。
-// 边界/副作用：源对象保持不变；类型不兼容时拒绝复制并保留可诊断状态。
     virtual function void do_copy(uvm_object rhs);
         dpu_vio_placement_request typed_rhs;
 
@@ -431,11 +357,6 @@ class dpu_vio_placement_request extends uvm_object;
         copy_from(typed_rhs);
     endfunction
 
-    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
-    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
-    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
-    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
-    // 重复调用表示显式重新抽样，调用方应控制调用次数。
     function void load_params(string	path = "dpu");
         begin
             int unsigned	qpairs;
@@ -472,7 +393,6 @@ class dpu_vio_placement_request extends uvm_object;
             dpu_function_key_t	fixed_devices[$];
             present = aip_cmdline_query::present(path, "fixed_devices", 1);
             if (present) begin
-                // 显式集合是一次完整声明；支持 AIP size/each/索引/compact，缺省键由 schema 定义。
                 `aip_struct_queue_apply(({path, ".fixed_devices"}), dpu_function_key_t, fixed_devices)
                 foreach (fixed_devices[index]) begin
                     if (fixed_devices[index].host_id >= DPU_MAX_HOSTS ||
@@ -499,9 +419,6 @@ class dpu_vio_placement_request extends uvm_object;
 endclass : dpu_vio_placement_request
 
 
-// 设计原因：为 authoring 输入提供明确字段边界，避免调用方以散落变量表达设备约束。
-// 职责与所有权：对象由调用方创建、编辑和拥有；解析器只读取或复制字段，不接管原始配置。
-// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_resource_placement_cfg extends uvm_object;
     `uvm_object_utils(dpu_resource_placement_cfg)
 
@@ -510,16 +427,10 @@ class dpu_resource_placement_cfg extends uvm_object;
     int unsigned reserved_global_qpair_ids[$];
     dpu_global_id_range_t reserved_global_qpair_ranges[$];
 
-// 功能：构造并初始化对象（new）。
-// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
-// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_resource_placement_cfg");
         super.new(name);
     endfunction
 
-// 功能：把源对象的配置或结果深拷贝到当前对象（copy_from）。
-// 输入/输出：输入为同型 rhs；无返回值，动态数组按值复制。
-// 边界/副作用：调用方仍拥有 rhs；空源或类型不符时拒绝，避免共享可变引用。
     function void copy_from(input dpu_resource_placement_cfg rhs);
         dpu_vio_placement_request request_copy;
 
@@ -539,9 +450,6 @@ class dpu_resource_placement_cfg extends uvm_object;
         end
     endfunction
 
-// 功能：实现 UVM copy 钩子，将源对象字段复制到当前对象（do_copy）。
-// 输入/输出：输入为 UVM object，先转换为同型对象；无返回值。
-// 边界/副作用：源对象保持不变；类型不兼容时拒绝复制并保留可诊断状态。
     virtual function void do_copy(uvm_object rhs);
         dpu_resource_placement_cfg typed_rhs;
 
@@ -553,11 +461,6 @@ class dpu_resource_placement_cfg extends uvm_object;
         copy_from(typed_rhs);
     endfunction
 
-    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
-    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
-    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
-    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
-    // 重复调用表示显式重新抽样，调用方应控制调用次数。
     function void load_params(string	path = "dpu");
         begin
             bit	present;
@@ -602,9 +505,6 @@ class dpu_resource_placement_cfg extends uvm_object;
 endclass : dpu_resource_placement_cfg
 
 
-// 设计原因：把状态、错误上下文和结果集合统一成可复制的值对象，便于跨层传递。
-// 职责与所有权：对象拥有自身文本和结果副本，不持有配置的可变引用。
-// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_placement_diagnostic extends uvm_object;
     `uvm_object_utils(dpu_placement_diagnostic)
 
@@ -620,17 +520,11 @@ class dpu_placement_diagnostic extends uvm_object;
     dpu_service_key_t service_key;
     string message;
 
-// 功能：构造并初始化对象（new）。
-// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
-// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_placement_diagnostic");
         super.new(name);
         clear();
     endfunction
 
-// 功能：清空或设置一条 placement diagnostic 的阶段、错误码和上下文（clear）。
-// 输入/输出：输入为诊断字段或错误详情；无返回值，更新当前 diagnostic。
-// 边界/副作用：清空只影响诊断对象；设置失败上下文不得继续修改资源分配结果。
     function void clear();
         stage = DPU_PLACE_STAGE_NONE;
         error_code = DPU_PLACE_ERR_NONE;
@@ -653,9 +547,6 @@ class dpu_placement_diagnostic extends uvm_object;
         message = "";
     endfunction
 
-// 功能：清空或设置一条 placement diagnostic 的阶段、错误码和上下文（set）。
-// 输入/输出：输入为诊断字段或错误详情；无返回值，更新当前 diagnostic。
-// 边界/副作用：清空只影响诊断对象；设置失败上下文不得继续修改资源分配结果。
     function void set(
         input dpu_placement_stage_e new_stage,
         input dpu_placement_error_e new_error_code,
@@ -667,49 +558,31 @@ class dpu_placement_diagnostic extends uvm_object;
         message = new_message;
     endfunction
 
-// 功能：为 placement diagnostic 写入 request/function/service/pair 定位上下文（set_request_context）。
-// 输入/输出：输入为对应标识；无返回值，不改变 placement plan。
-// 边界/副作用：上下文只用于错误定位；无效标识由上层校验并保留原错误原因。
     function void set_request_context(input int unsigned value);
         has_request_id = 1;
         request_id = value;
     endfunction
 
-// 功能：为 placement diagnostic 写入 request/function/service/pair 定位上下文（set_function_context）。
-// 输入/输出：输入为对应标识；无返回值，不改变 placement plan。
-// 边界/副作用：上下文只用于错误定位；无效标识由上层校验并保留原错误原因。
     function void set_function_context(input dpu_function_key_t value);
         has_function_key = 1;
         function_key = value;
     endfunction
 
-// 功能：为 placement diagnostic 写入 request/function/service/pair 定位上下文（set_service_context）。
-// 输入/输出：输入为对应标识；无返回值，不改变 placement plan。
-// 边界/副作用：上下文只用于错误定位；无效标识由上层校验并保留原错误原因。
     function void set_service_context(input dpu_service_key_t value);
         has_service_key = 1;
         service_key = value;
     endfunction
 
-// 功能：为 placement diagnostic 写入 request/function/service/pair 定位上下文（set_pair_context）。
-// 输入/输出：输入为对应标识；无返回值，不改变 placement plan。
-// 边界/副作用：上下文只用于错误定位；无效标识由上层校验并保留原错误原因。
     function void set_pair_context(input int unsigned value);
         has_pair_index = 1;
         request_pair_index = value;
     endfunction
 
-// 功能：设置对象的配置字段、依赖对象或错误上下文（set_device_resolution_failure）。
-// 输入/输出：输入为新值或外部对象；通常无返回值，字段写入当前对象。
-// 边界/副作用：必须尊重冻结边界；外部对象按约定借用或复制。
     function void set_device_resolution_failure(input string detail);
         set(DPU_PLACE_STAGE_DEVICE_RESOLUTION,
             DPU_PLACE_ERR_DEVICE_RESOLUTION_FAILED, detail);
     endfunction
 
-// 功能：把源对象的配置或结果深拷贝到当前对象（copy_from）。
-// 输入/输出：输入为同型 rhs；无返回值，动态数组按值复制。
-// 边界/副作用：调用方仍拥有 rhs；空源或类型不符时拒绝，避免共享可变引用。
     function void copy_from(input dpu_placement_diagnostic rhs);
         stage = rhs.stage;
         error_code = rhs.error_code;
@@ -724,9 +597,6 @@ class dpu_placement_diagnostic extends uvm_object;
         message = rhs.message;
     endfunction
 
-// 功能：实现 UVM copy 钩子，将源对象字段复制到当前对象（do_copy）。
-// 输入/输出：输入为 UVM object，先转换为同型对象；无返回值。
-// 边界/副作用：源对象保持不变；类型不兼容时拒绝复制并保留可诊断状态。
     virtual function void do_copy(uvm_object rhs);
         dpu_placement_diagnostic typed_rhs;
 

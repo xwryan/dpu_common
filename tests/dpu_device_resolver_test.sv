@@ -1042,9 +1042,8 @@ class dpu_device_resolver_test extends uvm_test;
                    64'h0000_0001_0400_0000, 64'h0000_0000_0200_0000);
     endfunction
 
-    // Random BAR placement must remain inside the declared MMIO aperture and
-    // preserve same-domain non-overlap, while producing more than one legal
-    // layout over repeated simulator-randomized resolutions.
+    // Random BAR placement stays inside the declared MMIO aperture with same-domain non-overlap,
+    // yet yields more than one legal layout over repeated simulator-randomized resolutions.
     function void test_random_bar_placement(input dpu_device_resolver resolver);
         dpu_device_cfg cfg;
         dpu_function_cfg peer;
@@ -1141,9 +1140,8 @@ class dpu_device_resolver_test extends uvm_test;
         expect_resolution_invalid(resolver, cfg, "BDF space exhausted");
     endfunction
 
-    // Catches AUTO allocation probing the entire 16-bit BDF space instead of
-    // iterating the configured high ranges, and catches a 16-bit loop counter
-    // that wraps before assigning the inclusive 16'hffff endpoint.
+    // Catches AUTO probing the whole 16-bit BDF space instead of the configured high ranges, and a
+    // 16-bit loop counter that wraps before assigning the inclusive 16'hffff endpoint.
     function void test_auto_bdf_scans_sorted_ranges_to_ffff(
         input dpu_device_resolver resolver
     );
@@ -1341,9 +1339,8 @@ class dpu_device_resolver_test extends uvm_test;
             (af_bar0.even_bar_id != 0))
             `uvm_fatal("RESOLVER_TEST", "expected AF query mismatch")
 
-        // BAR 布局由放置器决定（现按 size 降序先放大块），测试不锚定
-        // 具体地址字面值，而是检查规范角色顺序、对齐与窗口归属；防御
-        // 性拷贝检查改用查询到的实际基址做对比。
+        // BAR 布局由放置器决定（size 降序），测试不锚定地址字面值，只检查规范角色顺序、对齐与窗口归属；
+        // 防御性拷贝检查用查询到的实际基址比较。
         if (!snapshot.list_bars(cfg.functions[3].key, bars, why) ||
             (bars.size() != 3) ||
             (bars[0].role != DPU_BAR_DEVICE_MEMORY) ||
@@ -1450,10 +1447,8 @@ class dpu_device_resolver_test extends uvm_test;
             `uvm_fatal("CONFIG_RESOLVER", "base device failure lost stable placement diagnostic")
     endfunction
 
-    // Break caught: aggregate authored function count is ignored even when
-    // every individual function key is within its per-host/PF/VF limits.
-    // The rejected second candidate must not replace or mutate the first
-    // frozen snapshot.
+    // Catches an ignored aggregate function count when every key is within its per-host/PF/VF limit;
+    // the rejected second candidate must not replace or mutate the first frozen snapshot.
     function void test_aggregate_function_cap_is_atomic(
         input dpu_device_resolver resolver
     );

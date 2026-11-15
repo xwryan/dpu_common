@@ -1,6 +1,4 @@
-// dpu_common public short names.
-// These aliases keep the canonical names available for existing users while
-// making env/config/sequence declarations easier to read.
+// Public short-name aliases; the canonical names stay available for existing users.
 
 // Runtime objects.
 typedef dpu_env_cfg		dpu_cfg;

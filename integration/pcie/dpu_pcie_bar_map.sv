@@ -1,6 +1,5 @@
-// integration/pcie：在同一个 DPU BAR map 上绑定 Host RC 和 Intel 路由。
-// 不创建地址或内存，sequencer/快照均借用；所有 Memory/Completion 发送前检查实际路由。
-// 平台 requester 编码可不同于快照 BDF；显式记录可避免 EP/SW 模式推断。
+// 在 DPU BAR map 上绑定 Host RC 与 Intel 路由：sequencer/快照均借用，Memory/Completion 发送前检查实际路由。
+// 平台 requester 编码可不同于快照 BDF，显式记录以免按 EP/SW 模式推断。
 typedef struct {
 	dpu_function_key_t	function_key;
 	int unsigned		pf_index;
@@ -15,7 +14,6 @@ class dpu_pcie_bar_map extends dpu_bar_map;
 
 	uvm_sequencer #(pcie_tl_tlp)			rc_sequencers[int unsigned];
 
-	// 创建空路由目录，初始化和冻结由发布方依次完成。
 	extern function new(string	name = "dpu_pcie_bar_map");
 
 	// 绑定唯一 Host→RC slot；未知 Host、重复 slot 或冻结后修改返回失败。
@@ -25,7 +23,7 @@ class dpu_pcie_bar_map extends dpu_bar_map;
 		output string	why
 	);
 
-	// 绑定实际 Intel PF/VF 与 requester；检查位宽和同域歧义，不分配 BDF。
+	// 绑定实际 Intel PF(3 位)/VF(11 位) 与 requester（PF 的 vf_index 须为 -1）；检查位宽与同域歧义，不分配 BDF。
 	extern function bit bind_function(
 		dpu_function_key_t	key,
 		int unsigned		pf_index,
@@ -34,7 +32,7 @@ class dpu_pcie_bar_map extends dpu_bar_map;
 		output string		why
 	);
 
-	// 查询已冻结 Host/segment 的 RC 下标；未知域不回退到 RC0。
+	// 查询已冻结 Host/segment 的 RC 下标（segment 目前只支持 0）；未知域不回退到 RC0。
 	extern function bit get_slot(
 		int unsigned		host_id,
 		int unsigned		segment_id,
@@ -86,7 +84,6 @@ class dpu_pcie_bar_map extends dpu_bar_map;
 	);
 endclass
 
-// 基类只冻结资源；PCIe 扩展先检查所有 Host/segment 均可路由。
 function bit dpu_pcie_bar_map::freeze(output string	why);
 	dpu_host_info_t			hosts[$];
 	dpu_function_key_t		keys[$];
@@ -111,7 +108,6 @@ function bit dpu_pcie_bar_map::freeze(output string	why);
 	return super.freeze(why);
 endfunction
 
-// 不缓存第二份 BAR；sideband 始终从已校验的实际目标及显式 Function 映射生成。
 function bit dpu_pcie_bar_map::get_route(
 	input dpu_bar_target_t		target,
 	output pcie_tl_cq_route_t	route,
@@ -138,7 +134,6 @@ function bit dpu_pcie_bar_map::get_route(
 	return 1;
 endfunction
 
-// 发送前同时验证 Function 路由及 RC 句柄；失败不回退到调用者所在的其他 Host。
 function bit dpu_pcie_bar_map::get_sequencer(
 	input dpu_bar_target_t				target,
 	output uvm_sequencer#(pcie_tl_tlp)	sequencer,
@@ -158,12 +153,10 @@ function bit dpu_pcie_bar_map::get_sequencer(
 	return 1;
 endfunction
 
-// 创建空对象；调用 initialize 前任何查询/绑定都失败。
 function dpu_pcie_bar_map::new(string	name);
 	super.new(name);
 endfunction
 
-// Host 与 RC slot 一一对应；重复/未知 Host 或冻结后修改均失败。
 function bit dpu_pcie_bar_map::bind_host(
 	int unsigned	host_id,
 	int unsigned	rc_slot,
@@ -198,7 +191,6 @@ function bit dpu_pcie_bar_map::bind_host(
 	return 1;
 endfunction
 
-// 显式绑定 Intel 3 位 PF/11 位 VF 与 DMA requester；PF 的 vf_index 必须为 -1。
 function bit dpu_pcie_bar_map::bind_function(
 	dpu_function_key_t	key,
 	int unsigned		pf_index,
@@ -243,7 +235,6 @@ function bit dpu_pcie_bar_map::bind_function(
 	return 1;
 endfunction
 
-// 验证指定 Host/segment 的 RC slot；segment 当前只接受 0。
 function bit dpu_pcie_bar_map::get_slot(
 	int unsigned		host_id,
 	int unsigned		segment_id,
@@ -261,7 +252,6 @@ function bit dpu_pcie_bar_map::get_slot(
 	return 1;
 endfunction
 
-// Memory 使用实际窗口和整个字节跨度；不读取或改变 requester 身份。
 function bit dpu_pcie_bar_map::route_memory(
 	int unsigned				host_id,
 	int unsigned				segment_id,
@@ -311,7 +301,6 @@ function bit dpu_pcie_bar_map::route_memory(
 	return 1;
 endfunction
 
-// Completion 反查原 Requester ID，完全独立于 Memory 地址和 BAR 归属。
 function bit dpu_pcie_bar_map::route_completion(
 	int unsigned				host_id,
 	int unsigned				segment_id,
@@ -346,7 +335,6 @@ function bit dpu_pcie_bar_map::route_completion(
 	return 0;
 endfunction
 
-// 只读遍历平台 requester 映射；只有冻结 registry 可用于接收，未知身份明确拒绝。
 function bit dpu_pcie_bar_map::resolve_requester(
 	input int unsigned				host_id,
 	input bit [15:0]				requester_id,

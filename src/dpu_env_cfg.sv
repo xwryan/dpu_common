@@ -1,7 +1,5 @@
-// src：DPU 资源输入、唯一 BAR 视图和当前 DUT 表配置；不依赖 PCIe/VIO 类。
-// cfg 拥有 authoring/冻结表值，借用 resolver 快照；实际 ring/IOVA 由 VIO 导出并管理。
-// Host/Function/BAR 只分配一次；发布先验证同源冻结身份，失败保留旧发布值。
-// Notify 查找键取实际 doorbell 的高位；运行期刷新保留 Host/PF/VF/BAR，不自动访问 DUT。
+// DPU 资源输入、唯一 BAR 视图与当前 DUT 表配置；不依赖 PCIe/VIO 类，实际 ring/IOVA 由 VIO 导出并管理。
+// Host/Function/BAR 只分配一次；发布先校验同源冻结身份，失败保留旧发布值；运行期刷新不自动访问 DUT。
 class dpu_env_cfg extends uvm_object;
 	`uvm_object_utils(dpu_env_cfg)
 	// 默认采用驱动 VIO/QSCH/BDF/MSI-X/RDMA Notify/RNET 布局与无 IP 的 PF0 软件路由；显式平台声明优先。
@@ -75,21 +73,16 @@ class dpu_env_cfg extends uvm_object;
 	dpu_vio_service_t			services[string];
 	dpu_vio_queue_t				queues_by_host[int unsigned][$];
 
-	// 构造 authoring 输入和缺省 AF 身份；不读取参数、不分配 BAR/ring 或访问 DUT。
 	extern function new(string	name = "dpu_env_cfg");
 
-	// 唯一参数构建入口：先采样规模/模板，再创建 Host/PF/VF/placement 和 Host 行为。
-	// 再调用幂等返回，不重新采样；已有输入的项目应把加载入口合入原构造点，省去生成循环。
-	// 默认生成器拒绝覆盖非空逻辑配置，避免重复追加 Host/PF/VF 和资源请求。
-	// base_test 无须逐项赋值；AIP-off 时保留默认值，但仍正常创建对象。
+	// 唯一参数构建入口：先采样规模/模板，再创建 Host/PF/VF/placement 与 Host 行为；重复调用直接返回，不重新采样。
+	// 默认生成器拒绝覆盖已有逻辑拓扑（fatal），避免重复追加 Host/PF/VF 和资源请求。
 	extern function void load_params();
 
-	// 构造全局 Host 模板；GPA 和 MMIO 分开，BDF 范围覆盖默认 PF/VF 规模。
-	// 每 Host 的 identity 和参数覆盖由 load_params 设置，不在这里解析实际地址。
+	// 全局 Host 模板：GPA 与 MMIO 分开，BDF 范围覆盖默认 PF/VF 规模；每 Host 的身份与覆盖由 load_params 设置。
 	extern protected function dpu_host_cfg make_host_template();
 
-	// 按 Host/PF/VF 身份创建 Function，并从 DUT caps 取得 BAR 规格。
-	// 全部 BAR/BDF 均由 resolver 最终放置；未知规格立即 fatal，不能制造设备能力。
+	// 按 Host/PF/VF 身份创建 Function，BAR 规格取自 DUT caps（未知规格 fatal）；BAR/BDF 最终由 resolver 放置。
 	extern protected function dpu_function_cfg make_function(
 		int unsigned		host_id,
 		int unsigned		pf_id,
@@ -97,14 +90,11 @@ class dpu_env_cfg extends uvm_object;
 		int unsigned		vf_id
 	);
 
-	// build 或运行期候选加载表目标及消息模板；全局→Host→精确 Function 逐级覆盖。
-	// 固定键复用 AIP 宏，动态字段名复用同一 AIP 原生 API；存在性查询不消耗随机采样。
+	// 加载表目标与消息模板：全局→Host→精确 Function 逐级覆盖；存在性查询不消耗随机采样。
 	extern protected function void load_platform_params();
 
-	// 功能：采用驱动中已经核对的模块/表偏移补齐缺省布局，保留用户提供的完整布局和目标覆盖。
-	// 输入输出及副作用：读取 table_layouts、reg_target 和 frozen_reg_target，写入缺少 provided 标记的布局；不分配资源、不改写快照。
-	// 失败边界：本函数不验证 BAR 是否存在；未知目标、越界或显式布局字段错误由 publish/make_context 在冻结前拒绝。
-	// 空目标由 frozen_reg_target 解析；短名字通常按 owner Host 访问，单一管理表由 Host0 管理。
+	// 用驱动已核对的模块/表偏移补齐缺省布局，保留用户提供的布局与目标覆盖；BAR/越界错误由 publish/make_context 在冻结前拒绝。
+	// 空目标由 frozen_reg_target 解析；短名字按 owner Host 访问，单一管理表由 Host0 管理。
 	extern protected function void set_driver_layout(
 		input dpu_table_kind_e		kind,
 		input logic [63:0]			module_offset,
@@ -118,17 +108,15 @@ class dpu_env_cfg extends uvm_object;
 	// VTX/VRX 使用四次 DWORD 数据写和控制触发端口，不把间接表当作线性 MMIO。
 	extern function void use_driver_reference_layouts();
 
-	// 无 PCIe IP 的参考接线约定为各 Host PF0 / VF=-1 / wire requester=0 / vport=0。
-	// 这是 Intel sideband/DMA 软件路由，绝不表示已向 DUT 写 BDF/PFVF 表。
-	// 显式 policy 优先作为缺省值；CLI 可覆盖字段，其余 PF/VF 不猜 requester/Intel 身份。
+	// 无 PCIe IP 的参考接线：各 Host PF0 / VF=-1 / wire requester=0 / vport=0，仅为 Intel sideband/DMA 软件路由，不代表已写 BDF/PFVF 表。
+	// 显式 policy 优先作为缺省值，CLI 可覆盖字段；其余 PF/VF 不猜 requester/Intel 身份。
 	extern protected function void load_function_routes();
 
-	// 根据实际 TX 队列生成每 Function 一个 net；同源 Host、同目的 dpt 共享 group。
-	// 已生成结果保持稳定；释放/重载后才重新生成，空或纯 RX 配置不依赖 QSCH 参数。
+	// 按实际 TX 队列为每 Function 生成一个 net，同源 Host+同目的 dpt 共享 group（VNET lvl2 为源 Host）；结果稳定，释放/重载后才重新生成。
+	// 目的节点编号：ETH 从 0 开始，HOST 紧随实际 ETH 数；纯 RX/空配置不依赖 QSCH 参数。
 	extern protected function bit materialize_qsch_topology(output string	why);
 
-	// 用 AIP 原生有限候选分析检查 10-bit 调度编号，不先抽样再截断；rand/random 表示全域。
-	// 非 AIP 构建仅供 SV 固定十进制值和 rand/random；表达式错误返回具体输入。
+	// 用 AIP 原生有限候选分析检查 10-bit 调度编号（不先抽样再截断），mask 只用于容量与已用 ID 检查；rand/random 表示全域。
 	extern protected function bit qsch_candidates(
 		input string		expr,
 		output bit [1023:0]	values,
@@ -160,22 +148,19 @@ class dpu_env_cfg extends uvm_object;
 		output string			why
 	);
 
-	// 以实际 TX 队列的 net_id 和最终管理 BAR 为键合并默认调度项；纯 RX/空配置不依赖 QSCH。
-	// 每代从用户 catalog 重建 frozen_controls；同一地址的显式项优先，不改变其值或声明范围。
-	// 非 ETS/ETS 必须与全局模式一致；范围/布局失败在任何 VIO MMIO 写入前返回原因。
+	// 以实际 TX 队列的 net_id 和最终管理 BAR 为键合并默认调度项；每代从用户 catalog 重建 frozen_controls，同址显式项优先。
+	// 非 ETS/ETS 须与全局模式一致；范围/布局失败在任何 VIO MMIO 写入前返回，纯 RX/空配置不依赖 QSCH。
 	extern protected function bit materialize_qsch_controls(output string	why);
 
-	// 以最终 service 完成模式选择 Function；轮询且未要求公共配置时保持空范围，不误选全部。
-	// MSI-X pair 必须有对应未屏蔽消息；公共模式另保留显式消息的 AF/其他 Function。
-	// 在 env connect 发布资源后、任何 DUT 写入前调用；缺 Host cfg/快照时明确返回依赖错误。
+	// 按最终 service 完成模式选择 Function：轮询且未要求公共配置时保持空范围；MSI-X pair 须有对应未屏蔽消息，
+	// 公共模式另保留显式消息的 AF/其他 Function。须在 env connect 发布资源后、任何 DUT 写入前调用。
 	extern function bit select_msix_scope(
 		output dpu_cfg_scope	scope,
 		output string			why
 	);
 
-	// 驱动按 Host/PFVF 排 Function、按 local vector 排组内项；global vector 仅作为查找结果。
-	// 默认独立 API 首次消费完整冻结消息；默认 body 显式选择完成模式范围后生成紧凑目录。
-	// 所有行必须落到同一管理 bank，失败不发布半份目录，也不按局部 public scope 重新编号。
+	// 驱动按 Host/PFVF 排 Function、组内按 local vector 排列（global vector 仅是查找结果）；所有行须落在同一管理 bank，
+	// 失败不发布半份目录，也不按局部 scope 重新编号。
 	extern protected function bit materialize_msix_linear_records(
 		output string		why,
 		input dpu_cfg_scope	scope = null
@@ -229,9 +214,7 @@ class dpu_env_cfg extends uvm_object;
 	// 控制 payload/mask 只来自已冻结 catalog，不把未定义位扩展成全可写。
 	extern function logic [127:0] platform_control_mask(input dpu_table_item_t	record);
 
-	// 功能：按 kind/scope 从冻结 Function、消息和布局生成公共表记录，RDMA Notify 同时接受 PF/VF。
-	// 输入输出及副作用：selected 返回所选记录，why 返回失败原因；可建立 MSI-X 目录缓存，不访问 DUT。
-	// 失败边界：空/异源 scope、缺映射/布局/控制项、拆分 BAR 组或字段/索引越界时返回假，不依赖 VIO ring。
+	// 按 kind/scope 从冻结 Function、消息和布局生成公共表记录（RDMA Notify 接受 PF/VF）；可建立 MSI-X 目录缓存，不访问 DUT、不依赖 VIO ring。
 	extern function bit public_records(
 		input dpu_table_kind_e	kind,
 		input dpu_cfg_scope		scope,
@@ -239,13 +222,11 @@ class dpu_env_cfg extends uvm_object;
 		output string			why
 	);
 
-	// 驱动先按 Host/BAR 查找基址排序 Function，再在组内按 pair 编号排列；硬件行号是排序位置。
-	// 从完整已准备目录生成一次，RX/TX 共用 pair 项；空目录正常成功，global_qid 不作为表行号。
-	// 默认从实际 doorbell [60:7] 取基址；显式 BAR/offset 必须命中相同高位，低七位是队列编码。
-	// 同 Host 同基址属于不同 service 时存在查找歧义，拒绝发布；失败保持目录为空。
+	// 驱动按 Host/BAR 查找基址排序 Function、组内按 pair 排列，硬件行号即排序位置（不是 global_qid）；RX/TX 共用 pair 项。
+	// 基址默认取实际 doorbell [60:7]，低七位是队列编码；同 Host 同基址分属不同 service 时有歧义，拒绝发布并保持目录为空。
 	extern protected function bit materialize_notify_records(output string	why);
 
-	// 队列表按真实 service/qpair/IOVA 生成；任何平台策略越界都在窄字段赋值前拒绝。
+	// 队列表按真实 service/qpair/IOVA 生成（QSCH 只来自 TX 队列）；平台策略越界在窄字段赋值前拒绝。
 	extern function bit queue_records(
 		input dpu_cfg_scope		selection,
 		input dpu_table_kind_e	kinds[$],
@@ -253,7 +234,6 @@ class dpu_env_cfg extends uvm_object;
 		output string			why
 	);
 
-	// 小型类别集合查询，只统一遍历条件，不建立第二个 callback 引擎。
 	extern function bit kind_selected(
 		input dpu_table_kind_e	kind,
 		input dpu_table_kind_e	kinds[$]
@@ -327,7 +307,6 @@ class dpu_env_cfg extends uvm_object;
 	extern function void clear_host_queues(input int unsigned	host_id);
 endclass
 
-// 构造 authoring 输入和缺省 AF 身份；不读取参数、不分配 BAR/ring 或访问 DUT。
 function dpu_env_cfg::new(string	name = "dpu_env_cfg");
 	super.new(name);
 	device_cfg                      = dpu_device_cfg::type_id::create("device_cfg");
@@ -336,10 +315,6 @@ function dpu_env_cfg::new(string	name = "dpu_env_cfg");
 	device_cfg.af_request.requester = '{host_id: 0, pf_id: 0, kind: DPU_FUNCTION_PF, vf_id: 0};
 endfunction
 
-// 唯一参数构建入口：先采样规模/模板，再创建 Host/PF/VF/placement 和 Host 行为。
-// 再调用幂等返回，不重新采样；已有输入的项目应把加载入口合入原构造点，省去生成循环。
-// 默认生成器拒绝覆盖非空逻辑配置，避免重复追加 Host/PF/VF 和资源请求。
-// base_test 无须逐项赋值；AIP-off 时保留默认值，但仍正常创建对象。
 function void dpu_env_cfg::load_params();
 	dpu_dut_caps				caps;
 	dpu_host_cfg				host_template;
@@ -462,8 +437,6 @@ function void dpu_env_cfg::load_params();
 	params_loaded = 1;
 endfunction
 
-// 构造全局 Host 模板；GPA 和 MMIO 分开，BDF 范围覆盖默认 PF/VF 规模。
-// 每 Host 的 identity 和参数覆盖由 load_params 设置，不在这里解析实际地址。
 function dpu_host_cfg dpu_env_cfg::make_host_template();
 	dpu_host_cfg		host;
 	dpu_pcie_domain_cfg	domain;
@@ -497,8 +470,6 @@ function dpu_host_cfg dpu_env_cfg::make_host_template();
 	return host;
 endfunction
 
-// 按 Host/PF/VF 身份创建 Function，并从 DUT caps 取得 BAR 规格。
-// 全部 BAR/BDF 均由 resolver 最终放置；未知规格立即 fatal，不能制造设备能力。
 function dpu_function_cfg dpu_env_cfg::make_function(
 	int unsigned		host_id,
 	int unsigned		pf_id,
@@ -541,8 +512,6 @@ function dpu_function_cfg dpu_env_cfg::make_function(
 	return f;
 endfunction
 
-// build 或运行期候选加载表目标及消息模板；全局→Host→精确 Function 逐级覆盖。
-// 固定键复用 AIP 宏，动态字段名复用同一 AIP 原生 API；存在性查询不消耗随机采样。
 function void dpu_env_cfg::load_platform_params();
 	string				paths[$];
 	string				path;
@@ -1086,8 +1055,6 @@ function void dpu_env_cfg::load_platform_params();
 	end
 endfunction
 
-// 采用驱动中已经核对的模块/表偏移；只补缺项，保留用户提供的完整布局和目标覆盖。
-// 空目标由 frozen_reg_target 解析；短名字通常按 owner Host 访问，Notify/MSI-X 线性表由 Host0 管理。
 function void dpu_env_cfg::set_driver_layout(
 	input dpu_table_kind_e		kind,
 	input logic [63:0]			module_offset,
@@ -1123,11 +1090,6 @@ function void dpu_env_cfg::set_driver_layout(
 	end
 endfunction
 
-// 功能：安装驱动已核对的 BDF、MSI-X、VIO、QSCH 和 RDMA Notify/RNET 参考布局。
-// 输入输出及副作用：无输入；只调用 set_driver_layout 补齐未提供布局，并为 VTX/VRX 写入间接端口元数据。
-// 失败边界：显式 provided 布局始终优先且不被覆盖；参考值只描述已确认的 Intel 驱动地址，实际 BAR/范围错误留给冻结校验拒绝。
-// RDMA Notify 来自 INTF_PCOMPL_BASE+0xc000，256 项、8B；RNET 来自 DSCH_QSCH_BASE+0x15000，256 项、4B。
-// VTX/VRX 使用四次 DWORD 数据写和控制触发端口，不把间接表当作线性 MMIO。
 function void dpu_env_cfg::use_driver_reference_layouts();
 	set_driver_layout(DPU_TABLE_BDF, 'h100000, 'h08000, 4, 128, DPU_INDEX_EXPLICIT);
 	set_driver_layout(DPU_TABLE_MSIX_LINEAR, 'h080000, 'h40000, 8, 2048, DPU_INDEX_EXPLICIT);
@@ -1140,6 +1102,7 @@ function void dpu_env_cfg::use_driver_reference_layouts();
 	set_driver_layout(DPU_TABLE_G2P, 'hb00000, 'h14000, 4, 1024, DPU_INDEX_EXPLICIT);
 	set_driver_layout(DPU_TABLE_SPWRR, 'hb00000, 'h16000, 4, 1024, DPU_INDEX_EXPLICIT);
 	set_driver_layout(DPU_TABLE_TC_WEIGHT, 'hb00000, 'h18000, 4, 1024, DPU_INDEX_EXPLICIT);
+	// RDMA Notify = INTF_PCOMPL_BASE+0xc000（256 项 × 8B）；RNET = DSCH_QSCH_BASE+0x15000（256 项 × 4B）。
 	set_driver_layout(DPU_TABLE_RDMA_NOTIFY, 'h080000, 'h0c000, 8, 256, DPU_INDEX_EXPLICIT);
 	set_driver_layout(DPU_TABLE_RNET, 'hb00000, 'h15000, 4, 256, DPU_INDEX_EXPLICIT);
 
@@ -1162,9 +1125,6 @@ function void dpu_env_cfg::use_driver_reference_layouts();
 	end
 endfunction
 
-// 无 PCIe IP 的参考接线约定为各 Host PF0 / VF=-1 / wire requester=0 / vport=0。
-// 这是 Intel sideband/DMA 软件路由，绝不表示已向 DUT 写 BDF/PFVF 表。
-// 显式 policy 优先作为缺省值；CLI 可覆盖字段，其余 PF/VF 不猜 requester/Intel 身份。
 function void dpu_env_cfg::load_function_routes();
 	foreach (device_cfg.functions[f]) begin
 		dpu_function_key_t		owner;
@@ -1240,8 +1200,6 @@ function void dpu_env_cfg::load_function_routes();
 	end
 endfunction
 
-// 有限候选分析复用 AIP，不实现第二套范围/列表/权重解析器。
-// 10-bit mask 只用于检查容量和已用 ID；真正的随机抽样仍由原表达式决定。
 function bit dpu_env_cfg::qsch_candidates(
 	input string		expr,
 	output bit [1023:0]	values,
@@ -1270,8 +1228,6 @@ function bit dpu_env_cfg::qsch_candidates(
 	return 1;
 endfunction
 
-// 已用 ID 不再参与分配；单候选直接采用，rand 从剩余集合等概率选择。
-// AIP 范围/列表/权重按原规则抽样，只拒绝已用值，不把有权重表达式改成均匀分布。
 function bit dpu_env_cfg::qsch_pick(
 	input string		expr,
 	input bit [1023:0]	values,
@@ -1303,8 +1259,6 @@ function bit dpu_env_cfg::qsch_pick(
 	return 1;
 endfunction
 
-// 先分配候选少的请求（含固定值），再随机分配较宽请求；net 与 group 共用此规则。
-// 所有分配在局部完成，碰撞/容量不足返回具体键，调用方不发布部分拓扑。
 function bit dpu_env_cfg::qsch_ids(
 	input string		expressions[string],
 	output int unsigned	ids[string],
@@ -1344,9 +1298,6 @@ function bit dpu_env_cfg::qsch_ids(
 	return 1;
 endfunction
 
-// 按实际 TX Function 生成一次关联，固定值无需 RANDOM 模式，未指定编号采用 AUTO 默认。
-// 图片版目的节点：ETH 从 0 开始，HOST 紧跟实际 ETH 数；只允许快照中存在的 HOST0..4。
-// 同源 Host+dpt 合并 group，VNET lvl2 始终是源 Host；纯 RX/空配置不要求 QSCH。
 function bit dpu_env_cfg::materialize_qsch_topology(output string	why);
 	dpu_function_key_t	owners[string];
 	dpu_qsch_net_t		pending[string];
@@ -1473,8 +1424,6 @@ function bit dpu_env_cfg::materialize_qsch_topology(output string	why);
 	return 1;
 endfunction
 
-// 查询已生成关联供 Q2TC/N2G/G2P/SPWRR/TC_WEIGHT 共用；不在读表/写表时再次随机。
-// MANUAL 沿用原 service 基数/步长与端口公式；所有模式均在窄字段编码前验证范围。
 function bit dpu_env_cfg::qsch_route(
 	input dpu_vio_queue_t	queue,
 	output dpu_qsch_net_t	route,
@@ -1516,9 +1465,6 @@ function bit dpu_env_cfg::qsch_route(
 	return 1;
 endfunction
 
-// 以实际 TX 队列的 net_id 和最终管理 BAR 为键合并默认调度项；纯 RX/空配置不依赖 QSCH。
-// 每代从用户 catalog 重建 frozen_controls；同一地址的显式项优先，不改变其值或声明范围。
-// 非 ETS/ETS 必须与全局模式一致；范围/布局失败在任何 VIO MMIO 写入前返回原因。
 function bit dpu_env_cfg::materialize_qsch_controls(output string	why);
 	dpu_vio_queue_t		queues[$];
 	dpu_table_kind_e		kinds[$] = '{DPU_TABLE_SPWRR, DPU_TABLE_TC_WEIGHT};
@@ -1608,9 +1554,6 @@ function bit dpu_env_cfg::materialize_qsch_controls(output string	why);
 	return 1;
 endfunction
 
-// 以最终 service 完成模式选择 Function；轮询且未要求公共配置时保持空范围，不误选全部。
-// MSI-X pair 必须有对应未屏蔽消息；公共模式另保留显式消息的 AF/其他 Function。
-// 在 env connect 发布资源后、任何 DUT 写入前调用；缺 Host cfg/快照时明确返回依赖错误。
 function bit dpu_env_cfg::select_msix_scope(
 	output dpu_cfg_scope	scope,
 	output string			why
@@ -1681,9 +1624,6 @@ function bit dpu_env_cfg::select_msix_scope(
 	return materialize_msix_linear_records(why, scope);
 endfunction
 
-// 驱动按 Host/PFVF 排 Function、按 local vector 排组内项；global vector 仅作为查找结果。
-// 默认独立 API 首次消费完整冻结消息；默认 body 显式选择完成模式范围后生成紧凑目录。
-// 所有行必须落到同一管理 bank，失败不发布半份目录，也不按局部 public scope 重新编号。
 function bit dpu_env_cfg::materialize_msix_linear_records(
 	output string		why,
 	input dpu_cfg_scope	scope
@@ -1767,7 +1707,6 @@ function bit dpu_env_cfg::materialize_msix_linear_records(
 	return 1;
 endfunction
 
-// 公共向量来自资源快照，AF 额外资源也能在没有任何 VIO service 时产生消息项。
 function bit dpu_env_cfg::materialize_messages(
 	input dpu_resource_snapshot	resources,
 	output string				why
@@ -1803,7 +1742,6 @@ function bit dpu_env_cfg::materialize_messages(
 	return 1;
 endfunction
 
-// 同一共享向量只登记一次；显式消息优先但必须与冻结向量身份一致。
 function bit dpu_env_cfg::add_message(
 	input dpu_function_key_t	owner,
 	input int unsigned			local_vector,
@@ -1831,7 +1769,6 @@ function bit dpu_env_cfg::add_message(
 	return 1;
 endfunction
 
-// 仅 PF0/no-VF 且 Intel/PFVF 均为参考编码时通过；其余家族保留平台真实关系校验。
 function bit dpu_env_cfg::validate_pfvf_relationship(
 	input dpu_pfvf_relationship_t	family,
 	output string					why
@@ -1847,8 +1784,6 @@ function bit dpu_env_cfg::validate_pfvf_relationship(
 	return 0;
 endfunction
 
-// 从平台已冻结布局解析真实目标，图片相对偏移单独保留；整个操作范围先检查。
-// 缺失布局时仅按行列出表名、归属与修复入口，不展开完整配置或内部结构体。
 function bit dpu_env_cfg::make_context(
 	input dpu_table_kind_e		kind,
 	input dpu_function_key_t	owner,
@@ -2042,7 +1977,6 @@ function bit dpu_env_cfg::make_context(
 	return 1;
 endfunction
 
-// 同批配置中共享表项必须一致；合并消费者供 typed hook 使用，避免重复写同一硬件项。
 function bit dpu_env_cfg::remember_record(
 	input dpu_table_item_t	record,
 	output string			why
@@ -2072,8 +2006,6 @@ function bit dpu_env_cfg::remember_record(
 	return 1;
 endfunction
 
-// MSI-X/RNET/RDMA 的 Function 范围由实际 owner service 派生；AF/共享调度范围不能猜测。
-// 显式消费者逐一核对冻结拓扑并去重，表项生成和用户 hook 共用这一份关系。
 function bit dpu_env_cfg::control_consumers(
 	input dpu_control_cfg_t		item,
 	output dpu_service_key_t	consumers[$],
@@ -2125,7 +2057,6 @@ function bit dpu_env_cfg::control_consumers(
 	return 1;
 endfunction
 
-// 控制 payload/mask 只来自已冻结 catalog，不把未定义位扩展成全可写。
 function logic [127:0] dpu_env_cfg::platform_control_mask(input dpu_table_item_t	record);
 	foreach (frozen_controls[c])
 	if (frozen_controls[c].ctx.kind == record.ctx.kind && frozen_controls[c].ctx.table_index == record.ctx.table_index &&
@@ -2134,9 +2065,6 @@ function logic [127:0] dpu_env_cfg::platform_control_mask(input dpu_table_item_t
 	return 0;
 endfunction
 
-// 功能：按 kind/scope 从冻结 Function、消息和布局生成公共表记录，RDMA Notify 同时接受 PF/VF。
-// 输入输出及副作用：selected 返回所选记录，why 返回失败原因；可建立 MSI-X 目录缓存，不访问 DUT。
-// 失败边界：空/异源 scope、缺映射/布局/控制项、拆分 BAR 组或字段/索引越界时返回假，不依赖 VIO ring。
 function bit dpu_env_cfg::public_records(
 	input dpu_table_kind_e	kind,
 	input dpu_cfg_scope		scope,
@@ -2468,10 +2396,6 @@ function bit dpu_env_cfg::public_records(
 	return 1;
 endfunction
 
-// 驱动先按 Host/BAR 查找基址排序 Function，再在组内按 pair 编号排列；硬件行号是排序位置。
-// 从完整已准备目录生成一次，RX/TX 共用 pair 项；空目录正常成功，global_qid 不作为表行号。
-// 默认从实际 doorbell [60:7] 取基址；显式 BAR/offset 必须命中相同高位，低七位是队列编码。
-// 同 Host 同基址属于不同 service 时存在查找歧义，拒绝发布；失败保持目录为空。
 function bit dpu_env_cfg::materialize_notify_records(output string	why);
 	dpu_table_item_t	pending[$];
 	dpu_vio_queue_t		queues[$];
@@ -2589,8 +2513,6 @@ function bit dpu_env_cfg::materialize_notify_records(output string	why);
 	return 1;
 endfunction
 
-// 队列表按真实 service/qpair/IOVA 生成；QSCH 只由 TX 队列产生，RX 仍保留自身 QUEUE_AUX。
-// 未使用的方向不要求对应表布局；任何使用中的平台策略越界都在窄字段赋值前拒绝。
 function bit dpu_env_cfg::queue_records(
 	input dpu_cfg_scope		selection,
 	input dpu_table_kind_e	kinds[$],
@@ -2849,7 +2771,6 @@ function bit dpu_env_cfg::queue_records(
 	return 1;
 endfunction
 
-// 小型类别集合查询，只统一遍历条件，不建立第二个 callback 引擎。
 function bit dpu_env_cfg::kind_selected(
 	input dpu_table_kind_e	kind,
 	input dpu_table_kind_e	kinds[$]
@@ -2858,7 +2779,6 @@ function bit dpu_env_cfg::kind_selected(
 	return 0;
 endfunction
 
-// 只允许状态类别，调用者必须显式提供实测 PBA 容量和各自模块偏移。
 function bit dpu_env_cfg::get_state_context(
 	input dpu_table_kind_e		kind,
 	input dpu_function_key_t	owner,
@@ -2872,7 +2792,6 @@ function bit dpu_env_cfg::get_state_context(
 	return make_context(kind, owner, index, 0, item.ctx, why);
 endfunction
 
-// 同 PF 完整成员和实际 BDF/路由交付平台；缺映射/角色错误在调用纯规则前拒绝。
 function bit dpu_env_cfg::validate_pfvf_family(
 	input dpu_function_key_t	owner,
 	output string				why
@@ -2905,7 +2824,6 @@ function bit dpu_env_cfg::validate_pfvf_family(
 	return this.validate_pfvf_relationship(family, why);
 endfunction
 
-// 重采样只构造参数副本，复用冻结身份做校验；不调用DPU resolver或PCIE build流程。
 function bit dpu_env_cfg::make_runtime_candidate(
 	output dpu_env_cfg	candidate,
 	output string		why
@@ -3001,7 +2919,6 @@ function bit dpu_env_cfg::make_runtime_candidate(
 	return 1;
 endfunction
 
-// 仅复制明确支持的输入与缓存；同一cfg/Host cfg、BAR、snapshot、pool和sequencer句柄保持不变。
 function void dpu_env_cfg::apply_runtime_candidate(input dpu_env_cfg	candidate);
 	reg_target              = candidate.reg_target;
 	print_bar_map           = candidate.print_bar_map;
@@ -3039,7 +2956,6 @@ function void dpu_env_cfg::apply_runtime_candidate(input dpu_env_cfg	candidate);
 	msix_directory_ready = 0;
 endfunction
 
-// 返回冻结 Function 的值副本；只读租约和 service，不依赖 PCIe 绑定或 ring。
 function void dpu_env_cfg::list_functions(output dpu_function_record_t records[$]);
 	dpu_function_key_t		keys[$];
 	dpu_function_record_t	record;
@@ -3050,7 +2966,6 @@ function void dpu_env_cfg::list_functions(output dpu_function_record_t records[$
 	foreach (keys[i]) if (get_function(keys[i], record)) records.push_back(record);
 endfunction
 
-// 精确身份查询；未知 Function 或未发布快照返回 0，不回退 PF0。
 function bit dpu_env_cfg::get_function(
 	input dpu_function_key_t		key,
 	output dpu_function_record_t	record
@@ -3072,14 +2987,11 @@ function bit dpu_env_cfg::get_function(
 	return 1;
 endfunction
 
-// AF 额外资源只来自同一资源快照，不虚构 ring。
 function void dpu_env_cfg::list_af_extra_queues(output dpu_af_extra_queue_binding_t records[$]);
 	records.delete();
 	if (resource_snapshot != null) resource_snapshot.list_af_extra_queue_bindings(records);
 endfunction
 
-// 发布仅接受同源且冻结的 device/resources/BAR；消息与分组先在局部值中验证。
-// 全部通过后才更新句柄及冻结值；首次或再次发布失败都保持原来的可见状态。
 function bit dpu_env_cfg::publish(
 	input dpu_device_snapshot	device,
 	input dpu_resource_snapshot	resources,
@@ -3197,7 +3109,6 @@ function bit dpu_env_cfg::publish(
 	return 1;
 endfunction
 
-// 接收 VIO 缓存的最终需求；首次构建时生成固定 placement，重载时只刷新同一 service 的值。
 function void dpu_env_cfg::add_vio_service(
 	input dpu_vio_service_t	service,
 	input bit				create_request = 1
@@ -3217,8 +3128,6 @@ function void dpu_env_cfg::add_vio_service(
 	placement_cfg.vio_requests.push_back(request);
 endfunction
 
-// 接收 VIO 全部实际 ring 导出；只校验资源关联，不分配内存或重新采样参数。
-// 资源身份错误不接收新队列；策略校验失败时保留实际队列供排查，不确认或释放 ring。
 function bit dpu_env_cfg::set_queues(
 	input dpu_vio_queue_t	queues[$],
 	output string			why
@@ -3248,7 +3157,6 @@ function bit dpu_env_cfg::set_queues(
 	return materialize_qsch_topology(why) && materialize_qsch_controls(why) && materialize_notify_records(why);
 endfunction
 
-// 核对当前已导出的实际队列，拒绝释放后旧记录；VIO 的启停/确认仍由 VIO 管理。
 function bit dpu_env_cfg::check_queue(
 	input dpu_vio_queue_t	queue,
 	output string			why
@@ -3266,7 +3174,6 @@ function bit dpu_env_cfg::check_queue(
 	return 0;
 endfunction
 
-// VIO 确认 DUT 静止且释放 ring 后调用；保留其他 Host 的实际目录和硬件行号。
 function void dpu_env_cfg::clear_host_queues(input int unsigned	host_id);
 	string	remove_keys[$];
 

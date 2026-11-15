@@ -5,9 +5,8 @@ import uvm_pkg::*;
 `include "uvm_macros.svh"
 import dpu_resource_pkg::*;
 
-// Test-only corruption hooks verify that manager import is atomic and copies
-// externally visible profile identities instead of aliasing a snapshot's
-// internal storage. All leases themselves still come from the coordinator.
+// Test-only corruption hooks prove manager import is atomic and copies externally visible profile
+// identities instead of aliasing snapshot storage; all leases still come from the coordinator.
 class dpu_resource_manager_snapshot_probe extends dpu_resource_snapshot;
     `uvm_object_utils(dpu_resource_manager_snapshot_probe)
 
@@ -419,9 +418,8 @@ class dpu_resource_manager_test extends uvm_test;
         end
         assert_unconfigured(failed_manager, keys[0], "unfrozen snapshot");
 
-        // Resolve a fully valid, identity-matched pair, then use a test-only
-        // device hook to expose the manager guard independently.  The frozen
-        // resource snapshot continues to reference this exact device handle.
+        // Resolve a fully valid, identity-matched pair, then use a test-only device hook to expose the
+        // manager guard independently; the frozen resource snapshot still references this device handle.
         resolve_capacity_pair("unfrozen_device", unfrozen_device,
                               unfrozen_device_resource);
         if (!$cast(device_snapshot_probe, unfrozen_device) ||

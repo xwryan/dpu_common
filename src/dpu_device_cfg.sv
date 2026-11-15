@@ -1,17 +1,8 @@
-/*
- * 所属层次：src/ authoring 配置模型层。
- * 文件职责：声明 Host、PCIe domain、PF/VF、service、BAR 和 AF 请求等逻辑设备配置。
- * 主要依赖：dpu_device_types、dpu_resource_types。
- * 参数入口：load_params 显式读取 AIP，不在构造/复制中读取。
- * 加载边界：只更新 authoring 输入；拓扑创建、完整校验、快照冻结仍由调用方负责。
- * 所有权与生命周期：对象由调用方编辑和拥有；resolver 复制其内容，配置冻结后不依赖原对象的后续修改。
- */
+// 逻辑设备 authoring 配置：Host、PCIe domain、PF/VF、service、BAR 与 AF 请求。
+// 各类 load_params(path) 显式读取 AIP（当前字段即缺省值），构造/复制不会读取；path 无父路径继承，重复调用即重新抽样。
 `ifndef DPU_DEVICE_CFG_SV
 `define DPU_DEVICE_CFG_SV
 
-// 设计原因：为 authoring 输入提供明确字段边界，避免调用方以散落变量表达设备约束。
-// 职责与所有权：对象由调用方创建、编辑和拥有；解析器只读取或复制字段，不接管原始配置。
-// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_mmio_window_cfg extends uvm_object;
     `uvm_object_utils(dpu_mmio_window_cfg)
 
@@ -19,18 +10,12 @@ class dpu_mmio_window_cfg extends uvm_object;
     bit [63:0] limit;
     dpu_bar_role_e allowed_roles[$];
 
-// 功能：构造并初始化对象（new）。
-// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
-// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_mmio_window_cfg");
         super.new(name);
         base = '0;
         limit = '0;
     endfunction
 
-// 功能：判断对象是否满足指定状态、资格或引用关系（allows_role）。
-// 输入/输出：输入为待判断的键/状态；返回 bit，不修改对象。
-// 边界/副作用：边界值显式判断，不触发分配、排序或其他隐藏副作用。
     function bit allows_role(input dpu_bar_role_e role);
         foreach (allowed_roles[index]) begin
             if (allowed_roles[index] == role)
@@ -39,18 +24,12 @@ class dpu_mmio_window_cfg extends uvm_object;
         return 0;
     endfunction
 
-// 功能：把源对象的配置或结果深拷贝到当前对象（copy_from）。
-// 输入/输出：输入为同型 rhs；无返回值，动态数组按值复制。
-// 边界/副作用：调用方仍拥有 rhs；空源或类型不符时拒绝，避免共享可变引用。
     function void copy_from(input dpu_mmio_window_cfg rhs);
         base = rhs.base;
         limit = rhs.limit;
         allowed_roles = rhs.allowed_roles;
     endfunction
 
-// 功能：实现 UVM copy 钩子，将源对象字段复制到当前对象（do_copy）。
-// 输入/输出：输入为 UVM object，先转换为同型对象；无返回值。
-// 边界/副作用：源对象保持不变；类型不兼容时拒绝复制并保留可诊断状态。
     virtual function void do_copy(uvm_object rhs);
         dpu_mmio_window_cfg typed_rhs;
 
@@ -62,11 +41,6 @@ class dpu_mmio_window_cfg extends uvm_object;
         copy_from(typed_rhs);
     endfunction
 
-    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
-    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
-    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
-    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
-    // 重复调用表示显式重新抽样，调用方应控制调用次数。
     function void load_params(string	path = "dpu");
         begin
             bit	has_base;
@@ -103,9 +77,6 @@ class dpu_mmio_window_cfg extends uvm_object;
 endclass : dpu_mmio_window_cfg
 
 
-// 设计原因：为 authoring 输入提供明确字段边界，避免调用方以散落变量表达设备约束。
-// 职责与所有权：对象由调用方创建、编辑和拥有；解析器只读取或复制字段，不接管原始配置。
-// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_pcie_domain_cfg extends uvm_object;
     `uvm_object_utils(dpu_pcie_domain_cfg)
 
@@ -116,17 +87,11 @@ class dpu_pcie_domain_cfg extends uvm_object;
     dpu_address_range_t reserved_mmio_ranges[$];
     dpu_bar_placement_policy_e bar_placement_policy;
 
-// 功能：构造并初始化对象（new）。
-// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
-// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_pcie_domain_cfg");
         super.new(name);
         bar_placement_policy = DPU_BAR_PLACEMENT_FIRST_FIT;
     endfunction
 
-// 功能：把源对象的配置或结果深拷贝到当前对象（copy_from）。
-// 输入/输出：输入为同型 rhs；无返回值，动态数组按值复制。
-// 边界/副作用：调用方仍拥有 rhs；空源或类型不符时拒绝，避免共享可变引用。
     function void copy_from(input dpu_pcie_domain_cfg rhs);
         dpu_mmio_window_cfg window_copy;
 
@@ -148,9 +113,6 @@ class dpu_pcie_domain_cfg extends uvm_object;
         end
     endfunction
 
-// 功能：实现 UVM copy 钩子，将源对象字段复制到当前对象（do_copy）。
-// 输入/输出：输入为 UVM object，先转换为同型对象；无返回值。
-// 边界/副作用：源对象保持不变；类型不兼容时拒绝复制并保留可诊断状态。
     virtual function void do_copy(uvm_object rhs);
         dpu_pcie_domain_cfg typed_rhs;
 
@@ -162,11 +124,6 @@ class dpu_pcie_domain_cfg extends uvm_object;
         copy_from(typed_rhs);
     endfunction
 
-    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
-    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
-    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
-    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
-    // 重复调用表示显式重新抽样，调用方应控制调用次数。
     function void load_params(string	path = "dpu");
         begin
             dpu_bar_placement_policy_e	bar_policy;
@@ -203,9 +160,6 @@ class dpu_pcie_domain_cfg extends uvm_object;
 endclass : dpu_pcie_domain_cfg
 
 
-// 设计原因：为 authoring 输入提供明确字段边界，避免调用方以散落变量表达设备约束。
-// 职责与所有权：对象由调用方创建、编辑和拥有；解析器只读取或复制字段，不接管原始配置。
-// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_host_cfg extends uvm_object;
     `uvm_object_utils(dpu_host_cfg)
 
@@ -219,9 +173,6 @@ class dpu_host_cfg extends uvm_object;
     bit [63:0] gpa_limit;
     dpu_pcie_domain_cfg pcie_domains[$];
 
-// 功能：构造并初始化对象（new）。
-// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
-// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_host_cfg");
         super.new(name);
         host_id = 0;
@@ -233,9 +184,6 @@ class dpu_host_cfg extends uvm_object;
         gpa_limit = '0;
     endfunction
 
-// 功能：把源对象的配置或结果深拷贝到当前对象（copy_from）。
-// 输入/输出：输入为同型 rhs；无返回值，动态数组按值复制。
-// 边界/副作用：调用方仍拥有 rhs；空源或类型不符时拒绝，避免共享可变引用。
     function void copy_from(input dpu_host_cfg rhs);
         dpu_pcie_domain_cfg domain_copy;
 
@@ -259,9 +207,6 @@ class dpu_host_cfg extends uvm_object;
         end
     endfunction
 
-// 功能：实现 UVM copy 钩子，将源对象字段复制到当前对象（do_copy）。
-// 输入/输出：输入为 UVM object，先转换为同型对象；无返回值。
-// 边界/副作用：源对象保持不变；类型不兼容时拒绝复制并保留可诊断状态。
     virtual function void do_copy(uvm_object rhs);
         dpu_host_cfg typed_rhs;
 
@@ -273,11 +218,6 @@ class dpu_host_cfg extends uvm_object;
         copy_from(typed_rhs);
     endfunction
 
-    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
-    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
-    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
-    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
-    // 重复调用表示显式重新抽样，调用方应控制调用次数。
     function void load_params(string	path = "dpu");
         begin
             int unsigned	address_width;
@@ -321,9 +261,6 @@ class dpu_host_cfg extends uvm_object;
 endclass : dpu_host_cfg
 
 
-// 设计原因：为 authoring 输入提供明确字段边界，避免调用方以散落变量表达设备约束。
-// 职责与所有权：对象由调用方创建、编辑和拥有；解析器只读取或复制字段，不接管原始配置。
-// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_bar_request extends uvm_object;
     `uvm_object_utils(dpu_bar_request)
 
@@ -334,9 +271,6 @@ class dpu_bar_request extends uvm_object;
     dpu_allocation_mode_e placement;
     bit [63:0] pinned_base;
 
-// 功能：构造并初始化对象（new）。
-// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
-// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_bar_request");
         super.new(name);
         role = DPU_BAR_DEVICE_MEMORY;
@@ -347,9 +281,6 @@ class dpu_bar_request extends uvm_object;
         pinned_base = '0;
     endfunction
 
-// 功能：把源对象的配置或结果深拷贝到当前对象（copy_from）。
-// 输入/输出：输入为同型 rhs；无返回值，动态数组按值复制。
-// 边界/副作用：调用方仍拥有 rhs；空源或类型不符时拒绝，避免共享可变引用。
     function void copy_from(input dpu_bar_request rhs);
         role = rhs.role;
         even_bar_id = rhs.even_bar_id;
@@ -359,9 +290,6 @@ class dpu_bar_request extends uvm_object;
         pinned_base = rhs.pinned_base;
     endfunction
 
-// 功能：实现 UVM copy 钩子，将源对象字段复制到当前对象（do_copy）。
-// 输入/输出：输入为 UVM object，先转换为同型对象；无返回值。
-// 边界/副作用：源对象保持不变；类型不兼容时拒绝复制并保留可诊断状态。
     virtual function void do_copy(uvm_object rhs);
         dpu_bar_request typed_rhs;
 
@@ -373,11 +301,6 @@ class dpu_bar_request extends uvm_object;
         copy_from(typed_rhs);
     endfunction
 
-    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
-    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
-    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
-    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
-    // 重复调用表示显式重新抽样，调用方应控制调用次数。
     function void load_params(string	path = "dpu.bar");
         begin
             dpu_bar_role_e	role;
@@ -416,35 +339,23 @@ class dpu_bar_request extends uvm_object;
 endclass : dpu_bar_request
 
 
-// 设计原因：为 authoring 输入提供明确字段边界，避免调用方以散落变量表达设备约束。
-// 职责与所有权：对象由调用方创建、编辑和拥有；解析器只读取或复制字段，不接管原始配置。
-// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_service_decl extends uvm_object;
     `uvm_object_utils(dpu_service_decl)
 
     dpu_service_kind_e service_kind;
     int unsigned service_instance_id;
 
-// 功能：构造并初始化对象（new）。
-// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
-// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_service_decl");
         super.new(name);
         service_kind = DPU_SERVICE_VIO_NET;
         service_instance_id = 0;
     endfunction
 
-// 功能：把源对象的配置或结果深拷贝到当前对象（copy_from）。
-// 输入/输出：输入为同型 rhs；无返回值，动态数组按值复制。
-// 边界/副作用：调用方仍拥有 rhs；空源或类型不符时拒绝，避免共享可变引用。
     function void copy_from(input dpu_service_decl rhs);
         service_kind = rhs.service_kind;
         service_instance_id = rhs.service_instance_id;
     endfunction
 
-// 功能：实现 UVM copy 钩子，将源对象字段复制到当前对象（do_copy）。
-// 输入/输出：输入为 UVM object，先转换为同型对象；无返回值。
-// 边界/副作用：源对象保持不变；类型不兼容时拒绝复制并保留可诊断状态。
     virtual function void do_copy(uvm_object rhs);
         dpu_service_decl typed_rhs;
 
@@ -456,11 +367,6 @@ class dpu_service_decl extends uvm_object;
         copy_from(typed_rhs);
     endfunction
 
-    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
-    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
-    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
-    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
-    // 重复调用表示显式重新抽样，调用方应控制调用次数。
     function void load_params(string	path = "dpu.service");
         begin
             dpu_service_kind_e	kind;
@@ -477,9 +383,6 @@ class dpu_service_decl extends uvm_object;
 endclass : dpu_service_decl
 
 
-// 功能：执行与对象职责相关的内部辅助操作（dpu_service_kind_is_eligible）。
-// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
-// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
 function automatic bit dpu_service_kind_is_eligible(
     input dpu_service_kind_e kinds[$],
     input dpu_service_kind_e service_kind
@@ -492,9 +395,6 @@ function automatic bit dpu_service_kind_is_eligible(
 endfunction
 
 
-// 设计原因：为 authoring 输入提供明确字段边界，避免调用方以散落变量表达设备约束。
-// 职责与所有权：对象由调用方创建、编辑和拥有；解析器只读取或复制字段，不接管原始配置。
-// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_vf_template_cfg extends uvm_object;
     `uvm_object_utils(dpu_vf_template_cfg)
 
@@ -505,9 +405,6 @@ class dpu_vf_template_cfg extends uvm_object;
     dpu_bar_request bars[$];
     dpu_service_kind_e eligible_service_kinds[$];
 
-// 功能：构造并初始化对象（new）。
-// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
-// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_vf_template_cfg");
         super.new(name);
         vf_id = 0;
@@ -515,9 +412,6 @@ class dpu_vf_template_cfg extends uvm_object;
         pinned_bdf = '0;
     endfunction
 
-// 功能：把源对象的配置或结果深拷贝到当前对象（copy_from）。
-// 输入/输出：输入为同型 rhs；无返回值，动态数组按值复制。
-// 边界/副作用：调用方仍拥有 rhs；空源或类型不符时拒绝，避免共享可变引用。
     function void copy_from(input dpu_vf_template_cfg rhs);
         dpu_bar_request bar_copy;
 
@@ -539,9 +433,6 @@ class dpu_vf_template_cfg extends uvm_object;
         eligible_service_kinds = rhs.eligible_service_kinds;
     endfunction
 
-// 功能：实现 UVM copy 钩子，将源对象字段复制到当前对象（do_copy）。
-// 输入/输出：输入为 UVM object，先转换为同型对象；无返回值。
-// 边界/副作用：源对象保持不变；类型不兼容时拒绝复制并保留可诊断状态。
     virtual function void do_copy(uvm_object rhs);
         dpu_vf_template_cfg typed_rhs;
 
@@ -553,11 +444,6 @@ class dpu_vf_template_cfg extends uvm_object;
         copy_from(typed_rhs);
     endfunction
 
-    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
-    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
-    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
-    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
-    // 重复调用表示显式重新抽样，调用方应控制调用次数。
     function void load_params(string	path = "dpu.function");
         begin
             dpu_allocation_mode_e	bdf_mode;
@@ -592,25 +478,16 @@ class dpu_vf_template_cfg extends uvm_object;
 endclass : dpu_vf_template_cfg
 
 
-// 设计原因：为 authoring 输入提供明确字段边界，避免调用方以散落变量表达设备约束。
-// 职责与所有权：对象由调用方创建、编辑和拥有；解析器只读取或复制字段，不接管原始配置。
-// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_vf_pool_cfg extends uvm_object;
     `uvm_object_utils(dpu_vf_pool_cfg)
 
     dpu_function_key_t parent_pf;
     dpu_vf_template_cfg vf_templates[$];
 
-// 功能：构造并初始化对象（new）。
-// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
-// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_vf_pool_cfg");
         super.new(name);
     endfunction
 
-// 功能：把源对象的配置或结果深拷贝到当前对象（copy_from）。
-// 输入/输出：输入为同型 rhs；无返回值，动态数组按值复制。
-// 边界/副作用：调用方仍拥有 rhs；空源或类型不符时拒绝，避免共享可变引用。
     function void copy_from(input dpu_vf_pool_cfg rhs);
         dpu_vf_template_cfg template_copy;
 
@@ -628,9 +505,6 @@ class dpu_vf_pool_cfg extends uvm_object;
         end
     endfunction
 
-// 功能：实现 UVM copy 钩子，将源对象字段复制到当前对象（do_copy）。
-// 输入/输出：输入为 UVM object，先转换为同型对象；无返回值。
-// 边界/副作用：源对象保持不变；类型不兼容时拒绝复制并保留可诊断状态。
     virtual function void do_copy(uvm_object rhs);
         dpu_vf_pool_cfg typed_rhs;
 
@@ -642,11 +516,6 @@ class dpu_vf_pool_cfg extends uvm_object;
         copy_from(typed_rhs);
     endfunction
 
-    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
-    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
-    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
-    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
-    // 重复调用表示显式重新抽样，调用方应控制调用次数。
     function void load_params(string	path = "dpu.vf_pool");
         foreach (vf_templates[index]) begin
             if (vf_templates[index] != null)
@@ -657,9 +526,6 @@ class dpu_vf_pool_cfg extends uvm_object;
 endclass : dpu_vf_pool_cfg
 
 
-// 设计原因：为 authoring 输入提供明确字段边界，避免调用方以散落变量表达设备约束。
-// 职责与所有权：对象由调用方创建、编辑和拥有；解析器只读取或复制字段，不接管原始配置。
-// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_function_cfg extends uvm_object;
     `uvm_object_utils(dpu_function_cfg)
 
@@ -671,18 +537,12 @@ class dpu_function_cfg extends uvm_object;
     dpu_service_decl services[$];
     dpu_service_kind_e eligible_service_kinds[$];
 
-// 功能：构造并初始化对象（new）。
-// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
-// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_function_cfg");
         super.new(name);
         bdf_mode = DPU_ALLOC_AUTO;
         pinned_bdf = '0;
     endfunction
 
-// 功能：把源对象的配置或结果深拷贝到当前对象（copy_from）。
-// 输入/输出：输入为同型 rhs；无返回值，动态数组按值复制。
-// 边界/副作用：调用方仍拥有 rhs；空源或类型不符时拒绝，避免共享可变引用。
     function void copy_from(input dpu_function_cfg rhs);
         dpu_bar_request bar_copy;
         dpu_service_decl service_copy;
@@ -716,9 +576,6 @@ class dpu_function_cfg extends uvm_object;
         eligible_service_kinds = rhs.eligible_service_kinds;
     endfunction
 
-// 功能：实现 UVM copy 钩子，将源对象字段复制到当前对象（do_copy）。
-// 输入/输出：输入为 UVM object，先转换为同型对象；无返回值。
-// 边界/副作用：源对象保持不变；类型不兼容时拒绝复制并保留可诊断状态。
     virtual function void do_copy(uvm_object rhs);
         dpu_function_cfg typed_rhs;
 
@@ -730,11 +587,6 @@ class dpu_function_cfg extends uvm_object;
         copy_from(typed_rhs);
     endfunction
 
-    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
-    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
-    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
-    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
-    // 重复调用表示显式重新抽样，调用方应控制调用次数。
     function void load_params(string	path = "dpu.function");
         begin
             dpu_allocation_mode_e	bdf_mode;
@@ -769,34 +621,22 @@ class dpu_function_cfg extends uvm_object;
 endclass : dpu_function_cfg
 
 
-// 设计原因：为 authoring 输入提供明确字段边界，避免调用方以散落变量表达设备约束。
-// 职责与所有权：对象由调用方创建、编辑和拥有；解析器只读取或复制字段，不接管原始配置。
-// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_af_request extends uvm_object;
     `uvm_object_utils(dpu_af_request)
 
     dpu_af_selection_mode_e mode;
     dpu_function_key_t requester;
 
-// 功能：构造并初始化对象（new）。
-// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
-// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_af_request");
         super.new(name);
         mode = DPU_AF_SELECTED;
     endfunction
 
-// 功能：把源对象的配置或结果深拷贝到当前对象（copy_from）。
-// 输入/输出：输入为同型 rhs；无返回值，动态数组按值复制。
-// 边界/副作用：调用方仍拥有 rhs；空源或类型不符时拒绝，避免共享可变引用。
     function void copy_from(input dpu_af_request rhs);
         mode = rhs.mode;
         requester = rhs.requester;
     endfunction
 
-// 功能：实现 UVM copy 钩子，将源对象字段复制到当前对象（do_copy）。
-// 输入/输出：输入为 UVM object，先转换为同型对象；无返回值。
-// 边界/副作用：源对象保持不变；类型不兼容时拒绝复制并保留可诊断状态。
     virtual function void do_copy(uvm_object rhs);
         dpu_af_request typed_rhs;
 
@@ -808,11 +648,6 @@ class dpu_af_request extends uvm_object;
         copy_from(typed_rhs);
     endfunction
 
-    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
-    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
-    // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
-    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
-    // 重复调用表示显式重新抽样，调用方应控制调用次数。
     function void load_params(string	path = "dpu");
         begin
             int unsigned	af_host;
@@ -839,9 +674,6 @@ class dpu_af_request extends uvm_object;
 endclass : dpu_af_request
 
 
-// 设计原因：为 authoring 输入提供明确字段边界，避免调用方以散落变量表达设备约束。
-// 职责与所有权：对象由调用方创建、编辑和拥有；解析器只读取或复制字段，不接管原始配置。
-// 生命周期/失败边界：调用方必须遵守公开接口的状态前置条件；非法输入通过返回值或诊断路径报告。
 class dpu_device_cfg extends uvm_object;
     `uvm_object_utils(dpu_device_cfg)
 
@@ -851,18 +683,12 @@ class dpu_device_cfg extends uvm_object;
     dpu_vf_pool_cfg vf_pools[$];
     dpu_af_request af_request;
 
-// 功能：构造并初始化对象（new）。
-// 输入/输出：输入为构造参数（通常是 UVM 名称或键值）；无返回值。
-// 边界/副作用：不访问硬件；集合、错误状态和可选字段必须清空，避免复用泄漏旧状态。
     function new(string name = "dpu_device_cfg");
         super.new(name);
         dut_caps = dpu_dut_caps::type_id::create({name, "_dut_caps"});
         af_request = dpu_af_request::type_id::create({name, "_af_request"});
     endfunction
 
-// 功能：把源对象的配置或结果深拷贝到当前对象（copy_from）。
-// 输入/输出：输入为同型 rhs；无返回值，动态数组按值复制。
-// 边界/副作用：调用方仍拥有 rhs；空源或类型不符时拒绝，避免共享可变引用。
     function void copy_from(input dpu_device_cfg rhs);
         dpu_host_cfg host_copy;
         dpu_function_cfg function_copy;
@@ -916,9 +742,6 @@ class dpu_device_cfg extends uvm_object;
         end
     endfunction
 
-// 功能：实现 UVM copy 钩子，将源对象字段复制到当前对象（do_copy）。
-// 输入/输出：输入为 UVM object，先转换为同型对象；无返回值。
-// 边界/副作用：源对象保持不变；类型不兼容时拒绝复制并保留可诊断状态。
     virtual function void do_copy(uvm_object rhs);
         dpu_device_cfg typed_rhs;
 
@@ -930,13 +753,8 @@ class dpu_device_cfg extends uvm_object;
         copy_from(typed_rhs);
     endfunction
 
-    // 功能：显式加载 AIP 参数，当前字段作为缺省值；构造、复制均不会自动读取。
-    // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
-    // 副作用：仅加载能力和 AF 请求；Host/函数拓扑及实例覆盖顺序由调用方负责。
-    // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
-    // 重复调用表示显式重新抽样，调用方应控制调用次数。
     function void load_params(string	path = "dpu");
-        // Host/函数实例由上层 author_config 按模板复制和覆盖，不能在 aggregate 中再次读取。
+        // 只加载 caps 与 AF 请求；Host/函数实例由上层 author_config 按模板复制覆盖，不在此再次读取。
         if (dut_caps != null) dut_caps.load_params({path, ".caps"});
         if (af_request != null) af_request.load_params(path);
     endfunction

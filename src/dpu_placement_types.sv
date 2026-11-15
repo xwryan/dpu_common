@@ -1,9 +1,4 @@
-/*
- * 所属层次：src/ VIO 放置值类型层。
- * 文件职责：定义放置请求、候选、资源 profile、保留区间和诊断所需的枚举与结构体。
- * 主要依赖：SystemVerilog 基础类型、设备键类型。
- * 所有权与生命周期：类型采用值语义，由配置/快照对象管理生命周期，不单独分配资源。
- */
+// VIO 放置值类型：请求、候选、资源 profile、保留区间与诊断用的枚举/结构体。
 `ifndef DPU_PLACEMENT_TYPES_SV
 `define DPU_PLACEMENT_TYPES_SV
 
@@ -93,25 +88,21 @@ typedef struct {
     // independent from local_pair_id, which is the placement/resource label.
     int unsigned virtio_pair_index;
     int unsigned local_pair_id;
-    // Virtio-net protocol queue IDs.  RX/TX are the two directions of one
-    // hardware qpair and are derived from virtio_pair_index in the standard
-    // profile (2*p and 2*p+1).
+    // Virtio-net protocol queue IDs: RX/TX are the two directions of one hardware qpair,
+    // derived as 2*p and 2*p+1 from virtio_pair_index in the standard profile.
     int unsigned rx_local_virtqueue_id;
     int unsigned tx_local_virtqueue_id;
     int unsigned global_qpair_id;
-    // Local MSI-X vector index consumed by the driver's function interrupt
-    // array.  It is kept explicit so a future shared-vector policy can map
-    // several qpairs to one vector without changing the register builder.
+    // Local MSI-X vector index into the driver's function interrupt array; explicit so a future
+    // shared-vector policy can map several qpairs to one vector without touching the register builder.
     int unsigned local_msix_vector_id;
     // Resolved global MSI-X vector selected by the resource allocator.  The
     // register-plan builder consumes this binding and must never renumber it.
     int unsigned global_msix_vector_id;
 } dpu_vio_qpair_binding_t;
 
-// The real driver appends these AF-owned queue pairs after the ordinary LAN
-// queue pairs in func_res->txrx_queues[].  They are control/dataplane
-// resources, not guest-visible Virtio queues, so they use a separate binding
-// type and are never published through virtio_resource_client.
+// AF-owned queue pairs the real driver appends after the LAN pairs in func_res->txrx_queues[]:
+// control/dataplane resources, not guest-visible Virtio queues, so never published via virtio_resource_client.
 typedef enum int unsigned {
     DPU_AF_EXTRA_QUEUE_FORWARD,
     DPU_AF_EXTRA_QUEUE_BPDU,

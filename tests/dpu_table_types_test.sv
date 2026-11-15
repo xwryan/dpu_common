@@ -1,6 +1,5 @@
-// tests：独立 DPU 核心字段宽度与公共配置发布合同；只依赖 uvm_pkg/dpu_resource_pkg。
-// 复用默认 PF0 authoring 和正式 resolver 建立单 qpair 快照，覆盖同源检查及失败原子性。
-// 所有配置/快照由本模块持有至测试结束；不引入 PCIe/VIO，不分配 Host memory 或发送 DUT 请求。
+// DPU 核心字段宽度与公共配置发布合同测试：用默认 PF0 authoring 和正式 resolver 建立单 qpair 快照，
+// 覆盖同源检查与失败原子性；不引入 PCIe/VIO，不分配 Host memory 或发送 DUT 请求。
 module dpu_table_types_test;
 	import uvm_pkg::*;
 	import dpu_resource_pkg::*;
@@ -70,9 +69,7 @@ module dpu_table_types_test;
 		end
 	endfunction
 
-	// 功能：核对默认驱动布局已经覆盖 RDMA Notify/RNET，并检查管理表的访问 Host 选择。
-	// 输入输出及副作用：只读 cfg.table_layouts，不创建资源、不发布快照；失败通过 UVM fatal 暴露参考布局回归。
-	// 失败边界：缺少布局、偏移/宽度/容量不符，或 Notify 未固定到 Host0 管理窗口时终止测试；显式覆盖路径由生产 set_driver_layout 保证。
+	// 默认驱动布局须覆盖 RDMA Notify/RNET，且 Notify 管理表固定在 Host0 窗口。
 	function automatic void verify_rdma_driver_layouts(input dpu_env_cfg cfg);
 		dpu_table_layout_t	notify;
 		dpu_table_layout_t	rnet;

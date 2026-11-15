@@ -1,6 +1,4 @@
-// src：当前 VTX/VRX/Notify 硬件字段与 VIO 导出的实际配置值。
-// packed 只描述线格式；普通记录借用冻结快照，不拥有或释放设备/DMA 资源。
-// 保留 X/Z 供发送前拒绝；所有未知模块基址和端口由平台明确声明。
+// VTX/VRX/Notify 硬件字段与 VIO 导出的实际配置值；packed 结构只描述线格式。
 
 // service 需求是 VIO 唯一采样结果的中性投影，供分配和 MSI-X 选择；不复制完整 VIO cfg。
 typedef struct {
@@ -78,21 +76,19 @@ typedef struct packed {
 	logic [63:0]	dsc_addr;  //[63:0]，设备可见 ring IOVA
 } dpu_vrx_entry_t;
 
-// 真实 ring 绑定是校验依据，entry 修改不能反向更改已分配资源。
+// 以下三个结构中，真实 ring 绑定是校验依据，修改 entry 不能反向更改已分配资源。
 typedef struct {
 	dpu_table_ctx_t	ctx;
 	dpu_vio_queue_t	binding;
 	dpu_vtx_entry_t	entry;
 } dpu_vtx_cfg_t;
 
-// 真实 ring 绑定是校验依据，entry 修改不能反向更改已分配资源。
 typedef struct {
 	dpu_table_ctx_t	ctx;
 	dpu_vio_queue_t	binding;
 	dpu_vrx_entry_t	entry;
 } dpu_vrx_cfg_t;
 
-// 真实 ring 绑定是校验依据，entry 修改不能反向更改已分配资源。
 typedef struct {
 	dpu_table_ctx_t			ctx;
 	dpu_vio_queue_t			binding;
@@ -125,9 +121,8 @@ typedef struct {
 	int unsigned		lvl2_id;
 } dpu_qsch_net_t;
 
-// 队列平台策略按 service 给出；MANUAL 使用 net_base/net_stride/group_id/eth_ports/ets。
-// AUTO/RANDOM 的编号来自 cfg.qsch_nets；COS 仍由本 service 的显式策略控制。
-// VRX RAM 是 descriptor 槽，域名表示实际共享 RAM；不同 Host 相同域仍检查非重叠。
+// 队列平台策略按 service 给出：MANUAL 用 net_base/net_stride/group_id/eth_ports/ets，AUTO/RANDOM 的编号来自 cfg.qsch_nets，COS 仍由本 service 显式策略控制。
+// VRX RAM 以 descriptor 槽计，域名表示实际共享 RAM；不同 Host 相同域仍检查非重叠。
 typedef struct {
 	dpu_service_key_t	service_key;
 	dpu_vtx_entry_t		vtx;
