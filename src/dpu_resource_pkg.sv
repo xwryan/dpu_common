@@ -19,12 +19,8 @@ package dpu_resource_pkg;
   import uvm_pkg::*;
   `include "uvm_macros.svh"
 
-  // AIP 是可选依赖：未加载时不读取命令行，组合 cfg 仍按默认值构造资源输入。
-  // 不在这里 include AIP，避免同一类型在多个 package 中被重复定义。
-`ifdef AIP_CMDLINE_SV
+  // aip_core 须先编译；只导入不 include，避免同一类型在多个 package 中重复定义。
   import aip_core_pkg::*;
-  `include "dpu_aip_params.svh"
-`endif
 
   `include "dpu_device_types.sv"
   `include "dpu_placement_types.sv"

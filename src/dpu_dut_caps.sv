@@ -2,7 +2,7 @@
  * 所属层次：src/ DUT 能力描述层。
  * 文件职责：集中保存 BAR profile 与资源/编码上限，供解析、VIO 行为及公共表校验复用。
  * 主要依赖：dpu_device_types、dpu_resource_types。
- * 可选参数入口：load_params 显式读取 AIP；未编译 AIP 时无副作用，不在构造/复制中读取。
+ * 参数入口：load_params 显式读取 AIP，不在构造/复制中读取。
  * 加载边界：只更新 authoring 输入；拓扑创建、完整校验、快照冻结仍由调用方负责。
  * 所有权与生命周期：能力对象由调用方创建并可复制；查询接口不能反向修改能力配置。
  */
@@ -254,66 +254,63 @@ class dpu_dut_caps extends uvm_object;
     // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
     // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
     // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
-    // 未编译 AIP 时为空操作；重复调用表示显式重新抽样，调用方应控制调用次数。
+    // 重复调用表示显式重新抽样，调用方应控制调用次数。
     function void load_params(string	path = "dpu.caps");
-`ifdef AIP_CMDLINE_SV
         begin
             int unsigned	max_hosts;
-            `DPU_AIP_UINT(path, int unsigned, max_hosts, this.max_hosts)
+            `aip_uint(path, int unsigned, max_hosts, this.max_hosts)
             this.max_hosts = max_hosts;
         end
         begin
             int unsigned	max_pfs_per_host;
-            `DPU_AIP_UINT(path, int unsigned, max_pfs_per_host, this.max_pfs_per_host)
+            `aip_uint(path, int unsigned, max_pfs_per_host, this.max_pfs_per_host)
             this.max_pfs_per_host = max_pfs_per_host;
         end
         begin
             int unsigned	max_vfs_per_pf;
-            `DPU_AIP_UINT(path, int unsigned, max_vfs_per_pf, this.max_vfs_per_pf)
+            `aip_uint(path, int unsigned, max_vfs_per_pf, this.max_vfs_per_pf)
             this.max_vfs_per_pf = max_vfs_per_pf;
         end
         begin
             int unsigned	max_functions;
-            `DPU_AIP_UINT(path, int unsigned, max_functions, this.max_functions)
+            `aip_uint(path, int unsigned, max_functions, this.max_functions)
             this.max_functions = max_functions;
         end
         begin
             int unsigned	global_msix_vector_count;
-            `DPU_AIP_UINT(path, int unsigned, global_msix_vector_count, this.global_msix_vector_count)
+            `aip_uint(path, int unsigned, global_msix_vector_count, this.global_msix_vector_count)
             this.global_msix_vector_count = global_msix_vector_count;
         end
         begin
             int unsigned	mailbox_msix_vectors;
-            `DPU_AIP_UINT(path, int unsigned, mailbox_msix_vectors, this.mailbox_msix_vectors)
+            `aip_uint(path, int unsigned, mailbox_msix_vectors, this.mailbox_msix_vectors)
             this.mailbox_msix_vectors = mailbox_msix_vectors;
         end
         begin
             int unsigned	af_extra_msix_vectors;
-            `DPU_AIP_UINT(path, int unsigned, af_extra_msix_vectors, this.af_extra_msix_vectors)
+            `aip_uint(path, int unsigned, af_extra_msix_vectors, this.af_extra_msix_vectors)
             this.af_extra_msix_vectors = af_extra_msix_vectors;
         end
         begin
             int unsigned	af_extra_queue_count;
-            `DPU_AIP_UINT(path, int unsigned, af_extra_queue_count, this.af_extra_queue_count)
+            `aip_uint(path, int unsigned, af_extra_queue_count, this.af_extra_queue_count)
             this.af_extra_queue_count = af_extra_queue_count;
         end
         begin
             int unsigned	vio_global_qpair_count;
-            `DPU_AIP_UINT(path, int unsigned, vio_global_qpair_count, this.vio_global_qpair_count)
+            `aip_uint(path, int unsigned, vio_global_qpair_count, this.vio_global_qpair_count)
             this.vio_global_qpair_count = vio_global_qpair_count;
         end
         begin
             int unsigned	max_vio_net_qpairs_per_device;
-            `DPU_AIP_UINT(path, int unsigned, max_vio_net_qpairs_per_device, this.max_vio_net_qpairs_per_device)
+            `aip_uint(path, int unsigned, max_vio_net_qpairs_per_device, this.max_vio_net_qpairs_per_device)
             this.max_vio_net_qpairs_per_device = max_vio_net_qpairs_per_device;
         end
         begin
             int unsigned	vio_notify_entries_per_bank;
-            `DPU_AIP_UINT(path, int unsigned, vio_notify_entries_per_bank, this.vio_notify_entries_per_bank)
+            `aip_uint(path, int unsigned, vio_notify_entries_per_bank, this.vio_notify_entries_per_bank)
             this.vio_notify_entries_per_bank = vio_notify_entries_per_bank;
         end
-
-`endif
     endfunction
 
 endclass : dpu_dut_caps

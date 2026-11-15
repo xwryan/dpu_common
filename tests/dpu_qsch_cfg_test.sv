@@ -4,9 +4,7 @@
 module dpu_qsch_cfg_test;
 	import uvm_pkg::*;
 	import dpu_resource_pkg::*;
-`ifdef AIP_CMDLINE_SV
 	import aip_core_pkg::*;
-`endif
 	`include "uvm_macros.svh"
 
 	// 将失败立即定位到关联约束；正常测试不依赖捕获或降级 UVM 报错。
@@ -38,11 +36,8 @@ module dpu_qsch_cfg_test;
 			cfg.qsch_net_id   = "random";
 		end
 		if ($test$plusargs("QSCH_TEST_MIXED")) begin
-			cfg.qsch_net_id   = "random";
+			cfg.qsch_net_id   = "[0:5]";
 			cfg.qsch_group_id = "random";
-`ifdef AIP_CMDLINE_SV
-			cfg.qsch_net_id = "[0:5]";
-`endif
 		end
 		if ($test$plusargs("QSCH_TEST_MANUAL")) cfg.qsch_topology = DPU_QSCH_MANUAL;
 		cfg.load_params();
@@ -273,13 +268,11 @@ module dpu_qsch_cfg_test;
 		end
 		check(cfg.set_queues(queues, why), why);
 		verify_tables(cfg, queues);
-`ifdef AIP_CMDLINE_SV
 		if ($test$plusargs("QSCH_TEST_RELOAD")) begin
 			aip_cmdline_override::set_val("dpu.qsch.net_id", "[700:705]");
 			aip_cmdline_override::set_val("dpu.qsch.group_id", "[80:81]");
 			aip_cmdline_override::set_val("dpu.qsch.dpt", "1");
 		end
-`endif
 		check(cfg.make_runtime_candidate(candidate, why), why);
 		if (!$test$plusargs("QSCH_TEST_RELOAD"))
 		check(candidate.qsch_topology == cfg.qsch_topology && candidate.qsch_dpt == cfg.qsch_dpt &&

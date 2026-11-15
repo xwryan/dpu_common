@@ -367,12 +367,9 @@ function void dpu_env_cfg::load_params();
 		`uvm_fatal("PROJECT_CFG", why)
 	end
 
-`ifdef AIP_CMDLINE_SV
-	`DPU_AIP_UINT("dpu", longint unsigned, hosts, this.hosts)
-	`DPU_AIP_UINT("dpu", longint unsigned, pfs_per_host, this.pfs_per_host)
-	`DPU_AIP_UINT("dpu", longint unsigned, vfs_per_pf, this.vfs_per_pf)
-
-`endif
+	`aip_uint("dpu", longint unsigned, hosts, this.hosts)
+	`aip_uint("dpu", longint unsigned, pfs_per_host, this.pfs_per_host)
+	`aip_uint("dpu", longint unsigned, vfs_per_pf, this.vfs_per_pf)
 
 	if (
 		(hosts == 0) ||
@@ -389,10 +386,8 @@ function void dpu_env_cfg::load_params();
 		`uvm_fatal("PROJECT_CFG", "total Function count exceeds DUT capability")
 	end
 
-`ifdef AIP_CMDLINE_SV
 	`aip_string("dpu", reg_target, this.reg_target)
 	`aip_int("dpu", bit, print_bar_map, this.print_bar_map)
-`endif
 
 	host_template = make_host_template();
 	host_template.load_params("dpu");
@@ -617,7 +612,6 @@ function void dpu_env_cfg::load_platform_params();
 			};
 		end
 	end
-`ifdef AIP_CMDLINE_SV
 	`aip_int("dpu", bit, configure_public, this.configure_public)
 	`aip_int("dpu", bit, configure_bdf, this.configure_bdf)
 	`aip_int("dpu", bit, driver_layouts, this.driver_layouts)
@@ -629,10 +623,10 @@ function void dpu_env_cfg::load_platform_params();
 		longint unsigned	tc_weight;
 		bit					configure_controls;
 
-		`DPU_AIP_UINT("dpu.qsch", longint unsigned, mode, qsch_mode)
-		`DPU_AIP_UINT("dpu.qsch", longint unsigned, mode_offset, qsch_mode_offset)
-		`DPU_AIP_UINT("dpu.qsch", longint unsigned, spwrr, qsch_spwrr)
-		`DPU_AIP_UINT("dpu.qsch", longint unsigned, tc_weight, qsch_tc_weight)
+		`aip_uint("dpu.qsch", longint unsigned, mode, qsch_mode)
+		`aip_uint("dpu.qsch", longint unsigned, mode_offset, qsch_mode_offset)
+		`aip_uint("dpu.qsch", longint unsigned, spwrr, qsch_spwrr)
+		`aip_uint("dpu.qsch", longint unsigned, tc_weight, qsch_tc_weight)
 		`aip_int("dpu.qsch", bit, configure_controls, qsch_configure_controls)
 
 		if (mode > 1 || spwrr > 'hff || tc_weight > 32'hffffffff || mode_offset[1:0] != 0) begin
@@ -653,7 +647,7 @@ function void dpu_env_cfg::load_platform_params();
 		string					fields[$] = '{"net_id", "group_id", "dpt"};
 
 		`aip_enum("dpu.qsch", dpu_qsch_topology_e, topology, qsch_topology)
-		`DPU_AIP_UINT("dpu.qsch", int unsigned, eth_ports, qsch_eth_ports)
+		`aip_uint("dpu.qsch", int unsigned, eth_ports, qsch_eth_ports)
 		`aip_int("dpu.qsch", bit, print, qsch_print)
 
 		qsch_topology  = topology;
@@ -1090,7 +1084,6 @@ function void dpu_env_cfg::load_platform_params();
 		end
 		if (provided) vio_policies[dpu_service_key_name(service)] = q;
 	end
-`endif
 endfunction
 
 // 采用驱动中已经核对的模块/表偏移；只补缺项，保留用户提供的完整布局和目标覆盖。
@@ -1195,7 +1188,6 @@ function void dpu_env_cfg::load_function_routes();
 		fields_present = provided ? 4'hf : 0;
 		path           = $sformatf("dpu.h%0d.pf%0d", owner.host_id, owner.pf_id);
 		if (owner.kind == DPU_FUNCTION_VF) path = {path, $sformatf(".vf%0d", owner.vf_id)};
-`ifdef AIP_CMDLINE_SV
 		begin
 			string	fields[$] = '{"requester", "intel_pf", "intel_vf", "vport"};
 
@@ -1240,7 +1232,6 @@ function void dpu_env_cfg::load_function_routes();
 				policy.bdf_index = value;
 			end
 		end
-`endif
 		if (fields_present != 0 && fields_present != 4'hf) begin
 			`uvm_fatal("PROJECT_CFG", {
 					   path, " requires requester, intel_pf, intel_vf and vport together"})
@@ -1263,7 +1254,6 @@ function bit dpu_env_cfg::qsch_candidates(
 		why = "";
 		return 1;
 	end
-`ifdef AIP_CMDLINE_SV
 	begin
 		string		tokens[$];
 		aip_svec_t	id;
@@ -1276,15 +1266,6 @@ function bit dpu_env_cfg::qsch_candidates(
 			values[int'(id)] = 1;
 		end
 	end
-`else
-	begin
-		longint	id;
-		string	tail;
-
-		if ($sscanf(expr, "%d%s", id, tail) != 1 || id < 0 || id >= 1024) return 0;
-		values[int'(id)] = 1;
-	end
-`endif
 	why = "";
 	return 1;
 endfunction
@@ -1308,7 +1289,6 @@ function bit dpu_env_cfg::qsch_pick(
 	end else if (expr.tolower() inside {"rand", "random"}) begin
 		value = available[$urandom_range(available.size()-1)];
 	end else begin
-`ifdef AIP_CMDLINE_SV
 		for (int	attempt = 0; attempt < 65536; attempt++) begin
 			value = aip_cmdline#(int unsigned)::parse_value(expr);
 			if (value < 1024 && values[value]) begin
@@ -1316,7 +1296,6 @@ function bit dpu_env_cfg::qsch_pick(
 				return 1;
 			end
 		end
-`endif
 		why = {"QSCH exhausted draws for unused candidates: ", expr};
 		return 0;
 	end
@@ -2942,20 +2921,18 @@ function bit dpu_env_cfg::make_runtime_candidate(
 	requested_hosts = hosts;
 	requested_pfs   = pfs_per_host;
 	requested_vfs   = vfs_per_pf;
-`ifdef AIP_CMDLINE_SV
 	begin
 		longint unsigned	hosts;
 		longint unsigned	pfs_per_host;
 		longint unsigned	vfs_per_pf;
 
-		`DPU_AIP_UINT("dpu", longint unsigned, hosts, requested_hosts)
-		`DPU_AIP_UINT("dpu", longint unsigned, pfs_per_host, requested_pfs)
-		`DPU_AIP_UINT("dpu", longint unsigned, vfs_per_pf, requested_vfs)
+		`aip_uint("dpu", longint unsigned, hosts, requested_hosts)
+		`aip_uint("dpu", longint unsigned, pfs_per_host, requested_pfs)
+		`aip_uint("dpu", longint unsigned, vfs_per_pf, requested_vfs)
 		requested_hosts = hosts;
 		requested_pfs   = pfs_per_host;
 		requested_vfs   = vfs_per_pf;
 	end
-`endif
 	if (requested_hosts != hosts || requested_pfs != pfs_per_host || requested_vfs != vfs_per_pf) begin
 		why = "runtime reload preserves Host/PF/VF topology; rebuild for count changes";
 		return 0;
@@ -2999,7 +2976,6 @@ function bit dpu_env_cfg::make_runtime_candidate(
 	candidate.frozen_functions        = frozen_functions;
 	candidate.frozen_bar_groups       = frozen_bar_groups;
 
-`ifdef AIP_CMDLINE_SV
 	begin
 		string	reg_target;
 		bit		print_bar_map;
@@ -3009,7 +2985,6 @@ function bit dpu_env_cfg::make_runtime_candidate(
 		candidate.reg_target    = reg_target;
 		candidate.print_bar_map = print_bar_map;
 	end
-`endif
 	candidate.load_platform_params();
 	if (candidate.driver_layouts != driver_layouts) begin
 		why = "driver_layouts is a build-time default; edit explicit layouts before reload instead";

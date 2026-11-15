@@ -2,14 +2,13 @@
  * 所属层次：src/ VIO 放置 authoring 配置层。
  * 文件职责：声明候选过滤器、设备约束、qpair 覆盖、放置请求和诊断信息。
  * 主要依赖：dpu_device_types、dpu_placement_types、dpu_resource_types。
- * 可选参数入口：load_params 显式读取 AIP；未编译 AIP 时无副作用，不在构造/复制中读取。
+ * 参数入口：load_params 显式读取 AIP，不在构造/复制中读取。
  * 加载边界：只更新 authoring 输入；拓扑创建、完整校验、快照冻结仍由调用方负责。
  * 所有权与生命周期：配置对象由调用方编辑和拥有，normalizer 复制需要的字段；diagnostic 可清空复用。
  */
 `ifndef DPU_PLACEMENT_CFG_SV
 `define DPU_PLACEMENT_CFG_SV
 
-`ifdef AIP_CMDLINE_SV
 // 候选/固定设备使用已有 function key 的值语义，不建立 PF/VF 或绑定资源。
 // 仅显式给出集合覆盖时应用 schema；新增条目的缺省键为 h0/pf0/PF/vf0。
 // 原集合无参数时完整保留。显式重建集合后，由 load_params 和 normalizer 验证键与拓扑引用。
@@ -19,7 +18,6 @@
     `aip_field_enum(dpu_function_kind_e, kind, DPU_FUNCTION_PF)
     `aip_field_int(int unsigned, vf_id, 0)
 `aip_struct_type_end(dpu_function_key_t)
-`endif
 
 // 设计原因：将相关值和操作约束集中在独立边界，避免跨模块重复解释同一契约。
 // 职责与所有权：对象/类型按值语义管理自身字段，不隐式取得外部资源或生命周期控制权。
@@ -67,15 +65,13 @@ class dpu_vio_candidate_filter extends uvm_object;
     // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
     // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
     // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
-    // 未编译 AIP 时为空操作；重复调用表示显式重新抽样，调用方应控制调用次数。
+    // 重复调用表示显式重新抽样，调用方应控制调用次数。
     function void load_params(string	path = "dpu");
-`ifdef AIP_CMDLINE_SV
         begin
             bit	present;
             int unsigned	host_ids[$];
-            `DPU_AIP_PRESENT(path, "host_ids", present)
+            present = aip_cmdline_query::present(path, "host_ids", 1);
             if (present) begin
-                `DPU_AIP_UNSIGNED_QUEUE(path, "host_ids")
                 `aip_int_queue(path, int unsigned, host_ids, 0)
                 foreach (host_ids[index]) begin
                     if (host_ids[index] >= DPU_MAX_HOSTS)
@@ -87,9 +83,8 @@ class dpu_vio_candidate_filter extends uvm_object;
         begin
             bit	present;
             int unsigned	vf_ids[$];
-            `DPU_AIP_PRESENT(path, "vf_ids", present)
+            present = aip_cmdline_query::present(path, "vf_ids", 1);
             if (present) begin
-                `DPU_AIP_UNSIGNED_QUEUE(path, "vf_ids")
                 `aip_int_queue(path, int unsigned, vf_ids, 0)
                 foreach (vf_ids[index]) begin
                     if (vf_ids[index] >= DPU_MAX_VFS_PER_PF)
@@ -101,10 +96,9 @@ class dpu_vio_candidate_filter extends uvm_object;
         begin
             bit	present;
             dpu_function_key_t	parent_pfs[$];
-            `DPU_AIP_PRESENT(path, "parent_pfs", present)
+            present = aip_cmdline_query::present(path, "parent_pfs", 1);
             if (present) begin
                 // 显式集合是一次完整声明；支持 AIP size/each/索引/compact，缺省键由 schema 定义。
-                `DPU_AIP_UNSIGNED_QUEUE(path, "parent_pfs")
                 `aip_struct_queue_apply(({path, ".parent_pfs"}), dpu_function_key_t, parent_pfs)
                 foreach (parent_pfs[index]) begin
                     if (parent_pfs[index].host_id >= DPU_MAX_HOSTS ||
@@ -120,10 +114,9 @@ class dpu_vio_candidate_filter extends uvm_object;
         begin
             bit	present;
             dpu_function_key_t	functions[$];
-            `DPU_AIP_PRESENT(path, "functions", present)
+            present = aip_cmdline_query::present(path, "functions", 1);
             if (present) begin
                 // 显式集合是一次完整声明；支持 AIP size/each/索引/compact，缺省键由 schema 定义。
-                `DPU_AIP_UNSIGNED_QUEUE(path, "functions")
                 `aip_struct_queue_apply(({path, ".functions"}), dpu_function_key_t, functions)
                 foreach (functions[index]) begin
                     if (functions[index].host_id >= DPU_MAX_HOSTS ||
@@ -135,8 +128,6 @@ class dpu_vio_candidate_filter extends uvm_object;
                 this.function_keys = functions;
             end
         end
-
-`endif
     endfunction
 
 endclass : dpu_vio_candidate_filter
@@ -188,17 +179,16 @@ class dpu_vio_device_constraint extends uvm_object;
     // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
     // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
     // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
-    // 未编译 AIP 时为空操作；重复调用表示显式重新抽样，调用方应控制调用次数。
+    // 重复调用表示显式重新抽样，调用方应控制调用次数。
     function void load_params(string	path = "dpu.device");
-`ifdef AIP_CMDLINE_SV
         begin
             int unsigned	host;
-            `DPU_AIP_UINT(path, int unsigned, host, this.function_key.host_id)
+            `aip_uint(path, int unsigned, host, this.function_key.host_id)
             this.function_key.host_id = host;
         end
         begin
             int unsigned	pf;
-            `DPU_AIP_UINT(path, int unsigned, pf, this.function_key.pf_id)
+            `aip_uint(path, int unsigned, pf, this.function_key.pf_id)
             this.function_key.pf_id = pf;
         end
         begin
@@ -208,7 +198,7 @@ class dpu_vio_device_constraint extends uvm_object;
         end
         begin
             int unsigned	vf;
-            `DPU_AIP_UINT(path, int unsigned, vf, this.function_key.vf_id)
+            `aip_uint(path, int unsigned, vf, this.function_key.vf_id)
             this.function_key.vf_id = vf;
         end
         begin
@@ -218,11 +208,9 @@ class dpu_vio_device_constraint extends uvm_object;
         end
         begin
             int unsigned	qpairs;
-            `DPU_AIP_UINT(path, int unsigned, qpairs, this.qpair_count)
+            `aip_uint(path, int unsigned, qpairs, this.qpair_count)
             this.qpair_count = qpairs;
         end
-
-`endif
     endfunction
 
 endclass : dpu_vio_device_constraint
@@ -286,12 +274,11 @@ class dpu_vio_qpair_override extends uvm_object;
     // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
     // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
     // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
-    // 未编译 AIP 时为空操作；重复调用表示显式重新抽样，调用方应控制调用次数。
+    // 重复调用表示显式重新抽样，调用方应控制调用次数。
     function void load_params(string	path = "dpu.pair");
-`ifdef AIP_CMDLINE_SV
         begin
             int unsigned	index;
-            `DPU_AIP_UINT(path, int unsigned, index, this.request_pair_index)
+            `aip_uint(path, int unsigned, index, this.request_pair_index)
             this.request_pair_index = index;
         end
         begin
@@ -301,12 +288,12 @@ class dpu_vio_qpair_override extends uvm_object;
         end
         begin
             int unsigned	owner_host;
-            `DPU_AIP_UINT(path, int unsigned, owner_host, this.requested_owner.host_id)
+            `aip_uint(path, int unsigned, owner_host, this.requested_owner.host_id)
             this.requested_owner.host_id = owner_host;
         end
         begin
             int unsigned	owner_pf;
-            `DPU_AIP_UINT(path, int unsigned, owner_pf, this.requested_owner.pf_id)
+            `aip_uint(path, int unsigned, owner_pf, this.requested_owner.pf_id)
             this.requested_owner.pf_id = owner_pf;
         end
         begin
@@ -316,7 +303,7 @@ class dpu_vio_qpair_override extends uvm_object;
         end
         begin
             int unsigned	owner_vf;
-            `DPU_AIP_UINT(path, int unsigned, owner_vf, this.requested_owner.vf_id)
+            `aip_uint(path, int unsigned, owner_vf, this.requested_owner.vf_id)
             this.requested_owner.vf_id = owner_vf;
         end
         begin
@@ -326,7 +313,7 @@ class dpu_vio_qpair_override extends uvm_object;
         end
         begin
             int unsigned	local_id;
-            `DPU_AIP_UINT(path, int unsigned, local_id, this.requested_local_pair_id)
+            `aip_uint(path, int unsigned, local_id, this.requested_local_pair_id)
             this.requested_local_pair_id = local_id;
         end
         begin
@@ -336,11 +323,9 @@ class dpu_vio_qpair_override extends uvm_object;
         end
         begin
             int unsigned	global_id;
-            `DPU_AIP_UINT(path, int unsigned, global_id, this.requested_global_qpair_id)
+            `aip_uint(path, int unsigned, global_id, this.requested_global_qpair_id)
             this.requested_global_qpair_id = global_id;
         end
-
-`endif
     endfunction
 
 endclass : dpu_vio_qpair_override
@@ -450,22 +435,21 @@ class dpu_vio_placement_request extends uvm_object;
     // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
     // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
     // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
-    // 未编译 AIP 时为空操作；重复调用表示显式重新抽样，调用方应控制调用次数。
+    // 重复调用表示显式重新抽样，调用方应控制调用次数。
     function void load_params(string	path = "dpu");
-`ifdef AIP_CMDLINE_SV
         begin
             int unsigned	qpairs;
-            `DPU_AIP_UINT(path, int unsigned, qpairs, this.total_qpairs)
+            `aip_uint(path, int unsigned, qpairs, this.total_qpairs)
             this.total_qpairs = qpairs;
         end
         begin
             int unsigned	lan_msix;
-            `DPU_AIP_UINT(path, int unsigned, lan_msix, this.lan_msix_vectors)
+            `aip_uint(path, int unsigned, lan_msix, this.lan_msix_vectors)
             this.lan_msix_vectors = lan_msix;
         end
         begin
             int unsigned	placement_seed;
-            `DPU_AIP_UINT(path, int unsigned, placement_seed, this.seed)
+            `aip_uint(path, int unsigned, placement_seed, this.seed)
             this.seed = placement_seed;
         end
         begin
@@ -486,10 +470,9 @@ class dpu_vio_placement_request extends uvm_object;
         begin
             bit	present;
             dpu_function_key_t	fixed_devices[$];
-            `DPU_AIP_PRESENT(path, "fixed_devices", present)
+            present = aip_cmdline_query::present(path, "fixed_devices", 1);
             if (present) begin
                 // 显式集合是一次完整声明；支持 AIP size/each/索引/compact，缺省键由 schema 定义。
-                `DPU_AIP_UNSIGNED_QUEUE(path, "fixed_devices")
                 `aip_struct_queue_apply(({path, ".fixed_devices"}), dpu_function_key_t, fixed_devices)
                 foreach (fixed_devices[index]) begin
                     if (fixed_devices[index].host_id >= DPU_MAX_HOSTS ||
@@ -511,8 +494,6 @@ class dpu_vio_placement_request extends uvm_object;
             if (qpair_overrides[index] != null)
                 qpair_overrides[index].load_params($sformatf("%s.pair%0d", path, index));
         end
-
-`endif
     endfunction
 
 endclass : dpu_vio_placement_request
@@ -576,15 +557,13 @@ class dpu_resource_placement_cfg extends uvm_object;
     // 输入：path 是本次唯一作用域；AIP 不提供父路径继承，调用方应先加载模板再复制并覆盖实例。
     // 副作用：只读取本对象 authoring 字段；不分配硬件资源、不创建拓扑或访问快照。
     // 边界：类型/位宽或地址溢出立即 fatal；跨对象整体约束由调用方随后 validate/resolver 检查。
-    // 未编译 AIP 时为空操作；重复调用表示显式重新抽样，调用方应控制调用次数。
+    // 重复调用表示显式重新抽样，调用方应控制调用次数。
     function void load_params(string	path = "dpu");
-`ifdef AIP_CMDLINE_SV
         begin
             bit	present;
             int unsigned	reserved_qpairs[$];
-            `DPU_AIP_PRESENT(path, "reserved_qpairs", present)
+            present = aip_cmdline_query::present(path, "reserved_qpairs", 1);
             if (present) begin
-                `DPU_AIP_UNSIGNED_QUEUE(path, "reserved_qpairs")
                 `aip_int_queue(path, int unsigned, reserved_qpairs, 0)
                 foreach (reserved_qpairs[index]) begin
                     if (reserved_qpairs[index] >= DPU_MAX_VIO_GLOBAL_QPAIRS)
@@ -597,8 +576,8 @@ class dpu_resource_placement_cfg extends uvm_object;
             if (profiles[index].name == "virtio.qpair") begin
                 int unsigned	qpair_capacity;
                 int unsigned	qpair_per_func;
-                `DPU_AIP_UINT(path, int unsigned, qpair_capacity, profiles[index].capacity)
-                `DPU_AIP_UINT(path, int unsigned, qpair_per_func, profiles[index].max_per_function)
+                `aip_uint(path, int unsigned, qpair_capacity, profiles[index].capacity)
+                `aip_uint(path, int unsigned, qpair_per_func, profiles[index].max_per_function)
                 profiles[index].capacity = qpair_capacity;
                 profiles[index].max_per_function = qpair_per_func;
             end else begin
@@ -606,8 +585,8 @@ class dpu_resource_placement_cfg extends uvm_object;
                 int unsigned	capacity;
                 int unsigned	max_per_function;
                 pool_path = $sformatf("%s.pool%0d", path, index);
-                `DPU_AIP_UINT(pool_path, int unsigned, capacity, profiles[index].capacity)
-                `DPU_AIP_UINT(pool_path, int unsigned, max_per_function, profiles[index].max_per_function)
+                `aip_uint(pool_path, int unsigned, capacity, profiles[index].capacity)
+                `aip_uint(pool_path, int unsigned, max_per_function, profiles[index].max_per_function)
                 profiles[index].capacity = capacity;
                 profiles[index].max_per_function = max_per_function;
             end
@@ -618,8 +597,6 @@ class dpu_resource_placement_cfg extends uvm_object;
                 vio_requests[index].load_params(vio_requests.size() == 1 ? path :
                                                $sformatf("%s.request%0d", path, index));
         end
-
-`endif
     endfunction
 
 endclass : dpu_resource_placement_cfg

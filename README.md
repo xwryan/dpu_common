@@ -147,15 +147,18 @@ aperture；Host 数量始终由 `dpu_device_cfg.hosts[$]` 动态数组派生。�
 
 ## 编译
 
-将 `DPU_COMMON_ROOT` 指向本仓库根目录，然后把
-`filelists/dpu_common.f` 加入 VCS filelist：
+将 `DPU_COMMON_ROOT` 指向本仓库根目录、`AIP_CORE_ROOT` 指向 aip_core，先加入
+`filelists/aip_core.f`，再加入 `filelists/dpu_common.f`：
 
 ```bash
-export DPU_COMMON_ROOT=/path/to/dpu_common
+export DPU_COMMON_ROOT=/path/to/dpu_common AIP_CORE_ROOT=/path/to/aip_core
 vcs -sverilog -ntb_opts uvm \
+    -f "$DPU_COMMON_ROOT/filelists/aip_core.f" \
     -f "$DPU_COMMON_ROOT/filelists/dpu_common.f" \
     +incdir+"$DPU_COMMON_ROOT/src"
 ```
+
+aip_core 在每次编译中只能编译一次；已经先编译 aip_core 的上层项目只加入 `dpu_common.f`。
 
 `dpu_resource_pkg` 的实现通过 package 内的 include 按依赖顺序编译；
 因此不应再把同一批 `src/*.sv` 文件逐个加入编译命令。
@@ -175,11 +178,10 @@ vcs -sverilog -ntb_opts uvm \
 重新分配资源。Host/domain 到 Root 的绑定、PF/VF 到物理 Endpoint/link
 的绑定，以及 Host memory manager 的共享关系，全部在 PCIe 侧显式声明。
 
-## 可选 AIP 参数加载
+## AIP 参数加载
 
-在 `dpu_resource_pkg` 之前编译 `aip_core_pkg.sv` 时，各 authoring 类提供
-`function void load_params(string path = "dpu...")`。未编译 AIP 时这些方法
-仍存在并且不修改对象。`new`、`copy_from`、快照和运行状态均不会读取参数。
+aip_core 是必需依赖，各 authoring 类直接用其注册宏提供
+`function void load_params(string path = "dpu...")`。`new`、`copy_from`、快照和运行状态均不会读取参数。
 调用方完成加载后必须调用原有整体校验/解析流程；加载只检查输入类型、
 位宽、无符号负值以及地址相加溢出。
 
