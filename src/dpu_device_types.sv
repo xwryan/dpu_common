@@ -1,0 +1,157 @@
+/*
+ * 所属层次：src/ 设备键和轻量值类型层。
+ * 文件职责：定义设备逻辑对象的键、标识结构及稳定格式化/比较辅助函数。
+ * 主要依赖：SystemVerilog 基础类型。
+ * 所有权与生命周期：只提供值语义类型和纯函数，不持有外部资源或改变调用方数据。
+ */
+// =============================================================================
+// Canonical DPU device identities, placement records, and BAR roles
+// =============================================================================
+
+`ifndef DPU_DEVICE_TYPES_SV
+`define DPU_DEVICE_TYPES_SV
+
+typedef enum int unsigned { DPU_FUNCTION_PF, DPU_FUNCTION_VF }
+    dpu_function_kind_e;
+typedef enum int unsigned { DPU_ALLOC_AUTO, DPU_ALLOC_PINNED }
+    dpu_allocation_mode_e;
+// AUTO BAR placement policy.  FIRST_FIT is useful for deterministic debug;
+// RANDOM uses the simulator/UVM random stream while retaining all aperture,
+// alignment, reservation, and same-domain collision constraints.
+typedef enum int unsigned {
+    DPU_BAR_PLACEMENT_FIRST_FIT,
+    DPU_BAR_PLACEMENT_RANDOM
+} dpu_bar_placement_policy_e;
+typedef enum int unsigned {
+    DPU_SERVICE_VIO_NET, DPU_SERVICE_RDMA, DPU_SERVICE_VBLK
+} dpu_service_kind_e;
+typedef enum int unsigned { DPU_AF_SELECTED } dpu_af_selection_mode_e;
+typedef enum int unsigned {
+    DPU_BAR_DEVICE_MEMORY, DPU_BAR_MAILBOX, DPU_BAR_MSIX
+} dpu_bar_role_e;
+typedef enum int unsigned {
+    DPU_DEVICE_UNRESOLVED, DPU_DEVICE_RESOLVED,
+    DPU_DEVICE_APPLYING, DPU_DEVICE_ACTIVE, DPU_DEVICE_FAILED
+} dpu_device_state_e;
+
+typedef struct {
+    int unsigned host_id;
+    int unsigned pf_id;
+    dpu_function_kind_e kind;
+    int unsigned vf_id;
+} dpu_function_key_t;
+
+typedef struct { int unsigned host_id; int unsigned segment_id; }
+    dpu_pcie_domain_key_t;
+typedef struct { dpu_pcie_domain_key_t domain; bit [15:0] bdf; }
+    dpu_pcie_function_id_t;
+// Host 信息是 DPU 逻辑地址域的描述，不表示任何 PCIe 物理角色。
+// 快照会按值复制该结构，因而调用方不能通过查询结果修改原始配置。
+typedef struct {
+    int unsigned host_id;
+    bit enabled;
+    string name;
+    int unsigned address_width;
+    bit has_gpa_aperture;
+    bit [63:0] gpa_base;
+    bit [63:0] gpa_limit;
+} dpu_host_info_t;
+typedef struct {
+    dpu_function_key_t function_key;
+    dpu_service_kind_e service_kind;
+    int unsigned service_instance_id;
+} dpu_service_key_t;
+typedef struct { bit [15:0] first_bdf; bit [15:0] last_bdf; }
+    dpu_bdf_range_t;
+typedef struct { bit [63:0] base; bit [63:0] limit; }
+    dpu_address_range_t;
+typedef struct {
+    dpu_function_kind_e kind;
+    dpu_bar_role_e role;
+    int unsigned even_bar_id;
+    bit [63:0] size;
+    bit [63:0] alignment;
+} dpu_bar_profile_t;
+typedef struct {
+    dpu_function_key_t function_key;
+    dpu_bar_role_e role;
+    bit [63:0] bar_base;
+    bit [63:0] bar_size;
+    bit [63:0] offset;
+} dpu_bar_address_match_t;
+
+// 功能：把逻辑键转换为稳定的诊断/索引字符串（dpu_function_key_name）。
+// 输入/输出：输入为值语义键；返回格式化字符串，不修改输入。
+// 边界/副作用：格式必须与对应 lookup/list 索引一致；非法枚举不得静默映射为另一个合法键。
+function automatic string dpu_function_key_name(input dpu_function_key_t key);
+    return $sformatf("h%0d.pf%0d.k%0d.vf%0d", key.host_id, key.pf_id,
+                     key.kind, key.vf_id);
+endfunction
+
+// 功能：把逻辑键转换为稳定的诊断/索引字符串（dpu_service_key_name）。
+// 输入/输出：输入为值语义键；返回格式化字符串，不修改输入。
+// 边界/副作用：格式必须与对应 lookup/list 索引一致；非法枚举不得静默映射为另一个合法键。
+function automatic string dpu_service_key_name(input dpu_service_key_t key);
+    return $sformatf("%s.svc%0d.i%0d", dpu_function_key_name(key.function_key),
+                     key.service_kind, key.service_instance_id);
+endfunction
+
+// 功能：把逻辑键转换为稳定的诊断/索引字符串（dpu_pcie_domain_key_name）。
+// 输入/输出：输入为值语义键；返回格式化字符串，不修改输入。
+// 边界/副作用：格式必须与对应 lookup/list 索引一致；非法枚举不得静默映射为另一个合法键。
+function automatic string dpu_pcie_domain_key_name(
+    input dpu_pcie_domain_key_t key
+);
+    return $sformatf("h%0d.s%0d", key.host_id, key.segment_id);
+endfunction
+
+// 功能：把逻辑键转换为稳定的诊断/索引字符串（dpu_host_key_name）。
+// 输入/输出：输入为值语义键；返回格式化字符串，不修改输入。
+// 边界/副作用：格式必须与对应 lookup/list 索引一致；非法枚举不得静默映射为另一个合法键。
+function automatic string dpu_host_key_name(input int unsigned host_id);
+    return $sformatf("h%0d", host_id);
+endfunction
+
+// 功能：把逻辑键转换为稳定的诊断/索引字符串（dpu_pcie_function_id_name）。
+// 输入/输出：输入为值语义键；返回格式化字符串，不修改输入。
+// 边界/副作用：格式必须与对应 lookup/list 索引一致；非法枚举不得静默映射为另一个合法键。
+function automatic string dpu_pcie_function_id_name(
+    input dpu_pcie_function_id_t pcie_id
+);
+    return $sformatf("%s.b%04h", dpu_pcie_domain_key_name(pcie_id.domain),
+                     pcie_id.bdf);
+endfunction
+
+// 功能：把逻辑键转换为稳定的诊断/索引字符串（dpu_function_bar_key_name）。
+// 输入/输出：输入为值语义键；返回格式化字符串，不修改输入。
+// 边界/副作用：格式必须与对应 lookup/list 索引一致；非法枚举不得静默映射为另一个合法键。
+function automatic string dpu_function_bar_key_name(
+    input dpu_function_key_t key,
+    input dpu_bar_role_e role
+);
+    return $sformatf("%s.bar_role%0d", dpu_function_key_name(key), role);
+endfunction
+
+// 功能：执行与对象职责相关的内部辅助操作（dpu_same_function_key）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
+function automatic bit dpu_same_function_key(
+    input dpu_function_key_t lhs,
+    input dpu_function_key_t rhs
+);
+    return (lhs.host_id == rhs.host_id) && (lhs.pf_id == rhs.pf_id) &&
+           (lhs.kind == rhs.kind) && (lhs.vf_id == rhs.vf_id);
+endfunction
+
+// 功能：执行与对象职责相关的内部辅助操作（dpu_same_domain_key）。
+// 输入/输出：输入和输出由函数签名定义；通过返回值或 output 参数报告结果。
+// 边界/副作用：除签名明确写入外不产生隐藏副作用，失败时保持状态一致。
+function automatic bit dpu_same_domain_key(
+    input dpu_pcie_domain_key_t lhs,
+    input dpu_pcie_domain_key_t rhs
+);
+    return (lhs.host_id == rhs.host_id) &&
+           (lhs.segment_id == rhs.segment_id);
+endfunction
+
+`endif // DPU_DEVICE_TYPES_SV
