@@ -148,25 +148,25 @@ aperture；Host 数量始终由 `dpu_device_cfg.hosts[$]` 动态数组派生。�
 ## 编译
 
 将 `DPU_COMMON_ROOT` 指向本仓库根目录、`AIP_CORE_ROOT` 指向 aip_core，先加入
-`filelists/aip_core.f`，再加入 `filelists/dpu_common.f`：
+aip_core 自己的 `aip_core.f`，再加入本仓库的 `dpu_common.f`：
 
 ```bash
 export DPU_COMMON_ROOT=/path/to/dpu_common AIP_CORE_ROOT=/path/to/aip_core
-vcs -sverilog -ntb_opts uvm \
-    -f "$DPU_COMMON_ROOT/filelists/aip_core.f" \
-    -f "$DPU_COMMON_ROOT/filelists/dpu_common.f" \
-    +incdir+"$DPU_COMMON_ROOT/src"
+vcs -full64 -sverilog -ntb_opts uvm -timescale=1ns/1ps \
+    -f "$AIP_CORE_ROOT/aip_core.f" \
+    -f "$DPU_COMMON_ROOT/dpu_common.f" \
+    your_tb.sv
 ```
 
-aip_core 在每次编译中只能编译一次；已经先编译 aip_core 的上层项目只加入 `dpu_common.f`。
+aip_core 在每次编译中只编译一次；`dpu_common.f` 只含本仓库的 incdir 与 package 入口。
 
 `dpu_resource_pkg` 的实现通过 package 内的 include 按依赖顺序编译；
 因此不应再把同一批 `src/*.sv` 文件逐个加入编译命令。
 
-具体 PCIe 集成需要先编译 `dpu_resource_pkg` 和 `pcie_tl_pkg`，再显式加入：
+具体 PCIe 集成在 `dpu_common.f` 和 pcie_work 的 `pcie_work.f` 之后显式加入：
 
 ```text
--f $DPU_COMMON_ROOT/filelists/dpu_pcie.f
+-f $DPU_COMMON_ROOT/dpu_common_pcie.f
 ```
 
 该入口不重复编译核心，也不依赖 VIO 或参考 project。
