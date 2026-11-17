@@ -98,8 +98,8 @@ VTX `sport/sport_id` 和 VRX `dport/dport_id` 仍取真实 Host/Function 路由�
 N2G 前 vports 项给 VIO net，RDMA net 从 vports 开始，供 RDMA 的 QSCH 写项使用。
 `dpu.qsch.dbq_pages`（默认4，1..512）是每个有 RDMA 的 Host 的 QSCH DBQ 2MB 页数（驱动 dbq_sd_per_host，从 GREG 读取；
 这里按参数给出），sd_tbl（`0xb20000`）按 `host×页数+j` 存这些页的物理地址。
-`dpu.qsch.rdma_vfid_bits`（默认7，1..8）是 RDMA vfid 位宽（驱动 RDMA_VFID_BIT_SIZE）：VNET 模式 RDMA_NET_MAP 下标为
-`(dport << rdma_vfid_bits) | vfid`。当前版本 128 个 VF 取 7；旧版本（256 个 VF、驱动定义为 8）设 8。vfid 必须小于 2^位宽。
+`dpu.qsch.rdma_vfs`（默认128，1..256）是 RDMA 可用 VF 数。VNET 模式 RDMA_NET_MAP 下标仍为 `(dport << 8) | vfid`
+（驱动 RDMA_VFID_BIT_SIZE=8，规格不变）；当前版本只用前 128 个 vfid，高 128 行保留，grant 的 rdma_vf_id 必须小于该值。
 
 `vio_dpu_cfg_seq` 先准备实际 ring 并调用 `set_queues()`，随后继承的
 `dpu_cfg_seq.configure_qsch()` 读取以上记录，经 `pcie_tl_reg_seq` 写管理 BAR。
