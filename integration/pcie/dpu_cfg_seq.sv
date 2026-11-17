@@ -1,5 +1,6 @@
 // 公共 DUT 表配置 sequence：只依赖 dpu_env_cfg 与原生 PCIe TL，所有访问经 pcie_tl_reg_seq 发往实际目标 RC；ring/BAR 不归 seq 所有。
-// 默认 body：Host0/PF0 声明为 AF 并读回状态 8，再配置 BDF、VIO/QSCH（MSI-X 按完成模式）；VIO/RDMA 每批成功后每个管理 BAR 写一次 +0x80044=1。
+// 默认 body：Host0/PF0 声明为 AF 并读回状态 8，再配置 BDF、VIO/QSCH（MSI-X 按完成模式）；每批 Notify 成功后每个管理 BAR 写一次
+// ready=1（bank0）：VIO +0x80044，RDMA +0x80048。
 // Notify 只写实际队列对的有效项；未用槽位保持 DUT 复位值（05.png：type=3，lookup key/global_qid 全 1，reserved=0），seq 不写不读。
 class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
 	`uvm_object_utils(dpu_cfg_seq)
@@ -190,9 +191,13 @@ class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
 		output string			why
 	);
 
-	// 使能已完成写表的管理窗口；偏移为完整 BAR 内偏移，不叠加表地址或 bank。
+	// Notify ready 寄存器（驱动 INTF_PCMPL_CFG_{VIO,RDMA}_NOTIFY_TAB）：VIO 0x80044，RDMA 0x80048；完整 BAR 内偏移。
+	extern static function bit [63:0] notify_ready_offset(input dpu_table_kind_e	kind);
+
+	// 使能已完成写表的管理窗口：按表类型写 ready=1、sel=0（bank0），不叠加表地址。
 	extern virtual task enable_notify(
 		input dpu_bar_target_t	target,
+		input dpu_table_kind_e	kind,
 		output bit				ok,
 		output string			why
 	);
@@ -1946,6 +1951,7 @@ task dpu_cfg_seq::write_records(
 	output string			why
 );
 	dpu_bar_target_t	notify_targets[string];
+	dpu_table_kind_e	notify_kinds[string];
 	bit					seen[string];
 	bit [63:0]			address;
 
@@ -1953,9 +1959,14 @@ task dpu_cfg_seq::write_records(
 	foreach (batch[i]) begin
 		if (!cfg.remember_record(batch[i], why)) return;
 		if (batch[i].ctx.kind inside {DPU_TABLE_NOTIFY, DPU_TABLE_RDMA_NOTIFY}) begin
-			if (!cfg.bar_map.check_range(batch[i].ctx.target, 64'h0008_0044, 4, address, why))
+			string	target_key;
+
+			if (!cfg.bar_map.check_range(batch[i].ctx.target, notify_ready_offset(batch[i].ctx.kind), 4,
+										 address, why))
 				return;
-			notify_targets[batch[i].ctx.target.canonical_name] = batch[i].ctx.target;
+			target_key                 = {batch[i].ctx.target.canonical_name, ":", batch[i].ctx.kind.name()};
+			notify_targets[target_key] = batch[i].ctx.target;
+			notify_kinds[target_key]   = batch[i].ctx.kind;
 		end
 	end
 
@@ -1972,22 +1983,27 @@ task dpu_cfg_seq::write_records(
 		end
 	end
 
-	foreach (notify_targets[name]) begin
-		enable_notify(notify_targets[name], ok, why);
+	foreach (notify_targets[target_key]) begin
+		enable_notify(notify_targets[target_key], notify_kinds[target_key], ok, why);
 		if (!ok) return;
 	end
 	ok  = 1;
 	why = "";
 endtask
 
+function bit [63:0] dpu_cfg_seq::notify_ready_offset(input dpu_table_kind_e	kind);
+	return kind == DPU_TABLE_RDMA_NOTIFY ? 64'h0008_0048 : 64'h0008_0044;
+endfunction
+
 task dpu_cfg_seq::enable_notify(
 	input dpu_bar_target_t	target,
+	input dpu_table_kind_e	kind,
 	output bit				ok,
 	output string			why
 );
 	logic [127:0]	unused_readback;
 
-	mmio(target, 1, 64'h0008_0044, 4, 128'h1, 0, unused_readback, ok, why);
+	mmio(target, 1, notify_ready_offset(kind), 4, 128'h1, 0, unused_readback, ok, why);
 endtask
 
 task dpu_cfg_seq::enable_vio_queues(

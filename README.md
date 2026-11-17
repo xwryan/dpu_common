@@ -21,7 +21,8 @@ DPU 按这些值生成表，不能再次分配或猜测 descriptor 地址。
 
 `dpu_cfg_seq` 从启动 sequencer 的 `dpu_cfg` 键取得 `dpu_env_cfg`；
 `virtio_work/integration/dpu/vio_dpu_cfg_seq.sv` 只补 VIO 的准备/导出/确认/释放。
-VIO/RDMA 每批 Notify 成功后，每个管理 BAR 写一次 `+0x80044=1`；空批次不写，失败停止。
+每批 Notify 成功后，每个管理 BAR 写一次 ready=1（bank0）：VIO 写 `+0x80044`，RDMA 写 `+0x80048`；
+空批次不写，失败停止。
 AF `+0x1010` 的写 magic/读状态8，以及每100次 DWORD 写同步读均保留。
 
 当 `+dpu.driver_layouts=1`（默认值）时，参考布局同时覆盖 VIO/QSCH/BDF/MSI-X、RDMA
