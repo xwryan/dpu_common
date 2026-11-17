@@ -20,26 +20,6 @@ class dpu_device_resolver extends uvm_object;
         super.new(name);
     endfunction
 
-    // BAR randomization uses the simulator/UVM random stream so the seed controls reproducibility;
-    // rejection sampling avoids modulo bias for apertures larger than 32 bits.
-    protected function bit [63:0] random_u64();
-        return {$urandom(), $urandom()};
-    endfunction
-
-    protected function bit [63:0] random_bounded_u64(
-        input bit [63:0] upper_exclusive
-    );
-        bit [63:0] candidate;
-        bit [63:0] cutoff;
-
-        if (upper_exclusive <= 1)
-            return '0;
-        cutoff = ('1 / upper_exclusive) * upper_exclusive;
-        do candidate = random_u64();
-        while (candidate >= cutoff);
-        return candidate % upper_exclusive;
-    endfunction
-
     protected function string host_key_name(input int unsigned host_id);
         return $sformatf("h%0d", host_id);
     endfunction
@@ -799,7 +779,7 @@ class dpu_device_resolver extends uvm_object;
                         bit blocked;
 
                         aligned_base = first_aligned +
-                            random_bounded_u64(slot_count) *
+                            dpu_random_below(slot_count) *
                             bar_items[index].request.alignment;
                         bar_end = aligned_base + bar_items[index].request.size;
                         blocked = 0;

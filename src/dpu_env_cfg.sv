@@ -96,6 +96,14 @@ class dpu_env_cfg extends uvm_object;
 
 	// 加载表目标与消息模板：全局→Host→精确 Function 逐级覆盖；存在性查询不消耗随机采样。
 	extern protected function void load_platform_params();
+	// MSI-X 消息页：Function 所属 Host 与 domain、在 Host 地址空间随机选页、把页并入 domain 预留 MMIO。
+	extern protected function bit find_function_scope(input dpu_function_cfg f, output dpu_host_cfg host,
+													  output dpu_pcie_domain_cfg domain);
+	extern protected static function bit pick_msix_page(input dpu_host_cfg host,
+														input dpu_pcie_domain_cfg domain, input bit [63:0] span,
+														output bit [63:0] base);
+	extern protected static function void reserve_mmio_page(input dpu_pcie_domain_cfg domain,
+															input bit [63:0] address);
 
 	// 用驱动已核对的模块/表偏移补齐缺省布局，保留用户提供的布局与目标覆盖；BAR/越界错误由 publish/make_context 在冻结前拒绝。
 	// 空目标由 frozen_reg_target 解析；短名字按 owner Host 访问，单一管理表由 Host0 管理。
@@ -381,34 +389,12 @@ function void dpu_env_cfg::load_params();
 
 	for (int	unsigned	h = 0; h < hosts; h++) begin
 		dpu_host_cfg	host;
-		bit [64:0]		base;
-		bit [64:0]		limit;
 
 		host = dpu_host_cfg::type_id::create($sformatf("host_%0d", h));
 		host.copy_from(host_template);
 
 		host.host_id                     = h;
 		host.pcie_domains[0].key.host_id = h;
-
-		base  = {1'b0, host.gpa_base} + h * 65'h0000_0100_0000_0000;
-		limit = {1'b0, host.gpa_limit} + h * 65'h0000_0100_0000_0000;
-
-		if (base[64] || limit[64]) begin
-			`uvm_fatal("PROJECT_CFG", "Host GPA stride overflows")
-		end
-
-		host.gpa_base  = base[63:0];
-		host.gpa_limit = limit[63:0];
-
-		base  = {1'b0, host.pcie_domains[0].mmio_windows[0].base} + h * 65'h0000_0010_0000_0000;
-		limit = {1'b0, host.pcie_domains[0].mmio_windows[0].limit} + h * 65'h0000_0010_0000_0000;
-
-		if (base[64] || limit[64]) begin
-			`uvm_fatal("PROJECT_CFG", "Host MMIO stride overflows")
-		end
-
-		host.pcie_domains[0].mmio_windows[0].base  = base[63:0];
-		host.pcie_domains[0].mmio_windows[0].limit = limit[63:0];
 
 		host.load_params($sformatf("dpu.h%0d", h));
 		device_cfg.hosts.push_back(host);
@@ -449,9 +435,13 @@ function dpu_host_cfg dpu_env_cfg::make_host_template();
 
 	host = dpu_host_cfg::type_id::create("host_template");
 
+	// 每个 Host 一个独立地址空间（各自 RC 与 host_mem manager，Host 间可重叠），缺省 [4GB, 2^64-256TB)。
+	// 内存、BAR、MSI-X 消息页共用这一空间：BAR 在其中 2^61 以下部分随机放置，MSI-X 未给地址时随机选页，二者在
+	// 任何分配前预留进 host_mem，内存分配自动避开。低 4GB 不用（无空地址/32 位地址），顶端留 256TB 防地址回绕；
+	// buddy 只在分配时占存储，窗口大小不影响仿真。dpu[.hH].mem_base/mem_size、mmio_base/mmio_size 可调整。
 	host.has_gpa_aperture = 1;
-	host.gpa_base         = 64'h0000_1000_0000_0000;
-	host.gpa_limit        = host.gpa_base + 64'h1000_0000;
+	host.gpa_base         = 64'h0000_0001_0000_0000;
+	host.gpa_limit        = 64'hffff_0000_0000_0000;
 
 	domain     = dpu_pcie_domain_cfg::type_id::create("domain_template");
 	domain.key = '{host_id: 0, segment_id: 0};
@@ -462,8 +452,9 @@ function dpu_host_cfg dpu_env_cfg::make_host_template();
 
 	window = dpu_mmio_window_cfg::type_id::create("mmio_template");
 
-	window.base          = 64'h0000_0020_0000_0000;
-	window.limit         = window.base + 64'h0000_0001_0000_0000;
+	// DUT 的 VIO/RDMA notify 表只存 doorbell 地址 [60:7]/[60:13]，高位放 Host 号，BAR 必须低于 2^61。
+	window.base          = host.gpa_base;
+	window.limit         = 64'h2000_0000_0000_0000;
 	window.allowed_roles = '{DPU_BAR_DEVICE_MEMORY, DPU_BAR_MAILBOX, DPU_BAR_MSIX};
 
 	domain.mmio_windows.push_back(window);
@@ -514,6 +505,78 @@ function dpu_function_cfg dpu_env_cfg::make_function(
 	end
 
 	return f;
+endfunction
+
+function bit dpu_env_cfg::find_function_scope(
+	input dpu_function_cfg		f,
+	output dpu_host_cfg			host,
+	output dpu_pcie_domain_cfg	domain
+);
+	host   = null;
+	domain = null;
+	foreach (device_cfg.hosts[h]) begin
+		if (device_cfg.hosts[h] == null || device_cfg.hosts[h].host_id != f.key.host_id) continue;
+		host = device_cfg.hosts[h];
+		foreach (host.pcie_domains[d]) begin
+			if (host.pcie_domains[d] != null && dpu_same_domain_key(host.pcie_domains[d].key, f.domain_key))
+				domain = host.pcie_domains[d];
+		end
+	end
+	return (host != null) && (domain != null);
+endfunction
+
+// 在 [gpa_base, gpa_limit) 中随机选能放下 span 的 4KB 对齐区间并避开 domain 已有预留区；随机流来自仿真种子。
+function bit dpu_env_cfg::pick_msix_page(
+	input dpu_host_cfg			host,
+	input dpu_pcie_domain_cfg	domain,
+	input bit [63:0]			span,
+	output bit [63:0]			base
+);
+	bit [63:0]	bytes;
+	bit [63:0]	first;
+	bit [63:0]	slots;
+
+	base  = '0;
+	bytes = (span + 64'hfff) & ~64'hfff;
+	first = (host.gpa_base + 64'hfff) & ~64'hfff;
+	if (bytes == 0 || first < host.gpa_base || first >= host.gpa_limit || bytes > host.gpa_limit - first)
+		return 0;
+	slots = ((host.gpa_limit - first - bytes) >> 12) + 1;
+	for (int	attempt = 0; attempt < 64; attempt++) begin
+		bit	clash;
+
+		base  = first + (dpu_random_below(slots) << 12);
+		clash = 0;
+		foreach (domain.reserved_mmio_ranges[i]) begin
+			if (base < domain.reserved_mmio_ranges[i].limit && domain.reserved_mmio_ranges[i].base < base + bytes)
+				clash = 1;
+		end
+		if (!clash) return 1;
+	end
+	return 0;
+endfunction
+
+// 把 address 所在 4KB 页并入 domain 预留 MMIO：已覆盖则跳过，与已有区间相邻则扩展，否则新增。
+function void dpu_env_cfg::reserve_mmio_page(input dpu_pcie_domain_cfg domain, input bit [63:0] address);
+	dpu_address_range_t	page;
+
+	page.base  = address & ~64'hfff;
+	page.limit = (page.base == 64'hffff_ffff_ffff_f000) ? '1 : page.base + 64'h1000;
+	foreach (domain.reserved_mmio_ranges[i]) begin
+		if (domain.reserved_mmio_ranges[i].base <= page.base && page.limit <= domain.reserved_mmio_ranges[i].limit)
+			return;
+	end
+	foreach (domain.reserved_mmio_ranges[i]) begin
+		if (domain.reserved_mmio_ranges[i].limit == page.base) begin
+			domain.reserved_mmio_ranges[i].limit = page.limit;
+			return;
+		end
+		if (domain.reserved_mmio_ranges[i].base == page.limit) begin
+			domain.reserved_mmio_ranges[i].base = page.base;
+			return;
+		end
+	end
+	domain.reserved_mmio_ranges.push_back(page);
 endfunction
 
 function void dpu_env_cfg::load_platform_params();
@@ -681,8 +744,11 @@ function void dpu_env_cfg::load_platform_params();
 		dpu_function_key_t	owner;
 		bit					address_template_requested;
 		bit					data_template_requested;
+		dpu_host_cfg		scope_host;
+		dpu_pcie_domain_cfg	scope_domain;
 
 		owner = device_cfg.functions[f].key;
+		void'(find_function_scope(device_cfg.functions[f], scope_host, scope_domain));
 		name  = dpu_function_key_name(owner);
 		if (msix_policies.exists(name)) p = msix_policies[name];
 		else p = '{default: 0};
@@ -771,6 +837,20 @@ function void dpu_env_cfg::load_platform_params();
 				endcase
 			end
 		end
+		// 未显式给消息地址时在所属 Host 地址空间随机选一个 4KB 对齐页；只在会生成模板（已给 msg_data_base）时选，
+		// 选定后记入策略，重载沿用。未给 stride 时取 4，使各向量地址不同。
+		if (!p.address_present && p.data_present && scope_host != null && scope_domain != null &&
+			scope_host.has_gpa_aperture) begin
+			bit [69:0]	span;
+
+			if (!address_template_requested) p.address_stride = 4;
+			span = 70'(p.address_stride) * 70'd63 + 70'd4;
+			if (span[69:40] != 0)
+				`uvm_fatal("PROJECT_CFG", $sformatf("MSI-X msg_addr_stride too large for a random page: %s", name))
+			if (!pick_msix_page(scope_host, scope_domain, span[63:0], p.address_base))
+				`uvm_fatal("PROJECT_CFG", $sformatf("no free 4KB page for MSI-X messages of %s", name))
+			p.address_present = 1;
+		end
 		msix_policies[name] = p;
 		for (int	unsigned	v = 0; v < 64; v++) begin
 			dpu_msix_message_t	m;
@@ -840,6 +920,11 @@ function void dpu_env_cfg::load_platform_params();
 			if ((address_valid && address[64]) || (data_valid && data > 32'hffffffff))
 				`uvm_fatal("PROJECT_CFG", "MSI-X template overflow")
 			if (address_valid && data_valid) message_templates[name][v] = m;
+		end
+		// 有模板的消息地址所在页登记为 domain 预留 MMIO：BAR 解析时避开，平台创建 host_mem 时预留。
+		if (scope_domain != null && message_templates.exists(name)) begin
+			foreach (message_templates[name][v])
+				reserve_mmio_page(scope_domain, message_templates[name][v].address);
 		end
 	end
 	// 平台表策略沿同一全局→Host→精确 service 路径加载；资源几何仍由核心冻结合同拥有。

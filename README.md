@@ -152,6 +152,20 @@ aperture；Host 数量始终由 `dpu_device_cfg.hosts[$]` 动态数组派生。�
 按值复制的逻辑 Host 信息，适配层查询时不会修改 authoring 配置。名称为空
 时使用稳定的 `host_<id>` 名称；GPA aperture 要求 `base < limit`，地址宽度
 必须在 1 到 64 位之间。
+缺省每个 Host 是一个独立地址空间 `[0x1_0000_0000, 0xffff_0000_0000_0000)`（4GB 起，约 16 EiB）：各 Host 有独立的 RC 与
+host_mem manager，Host 之间地址可以重叠。内存、BAR 与 MSI-X 消息页共用这一空间：
+
+- BAR 窗口缺省取其中 2^61 以下部分 `[0x1_0000_0000, 0x2000_0000_0000_0000)`，BAR 按 RANDOM 策略随机放置；DUT 的 VIO/RDMA
+  notify 表只存 doorbell 地址 [60:7]/[60:13]、高位放 Host 号，因此 BAR 必须低于 2^61。
+- 未给 `msg_addr_base`（且已给 `msg_data_base`）时，每个 Function 在 Host 地址空间随机选一个 4KB 页作消息地址，
+  向量 v 的地址为页基址 + v×stride（未给 stride 时取 4，各向量地址不同）；选定后记入策略，重载沿用。
+- 有模板的消息页登记为 domain 的 `reserved_mmio_ranges`：BAR 解析时避开；平台创建 host_mem 时与 BAR 一起在任何分配前
+  预留，内存分配自动避开；VIO 的 IOMMU 也在任何映射前预留这些页，IOVA 分配同样避开（RC 先按地址识别 MSI-X）。
+  运行中重载新给的消息地址不再预留（只能在分配/映射前预留）。
+
+低 4GB 不用（无空地址/32 位地址），顶端留 256TB 防止地址回绕；窗口大小不占仿真存储（只在分配时占用）。
+`+dpu.mem_base/mem_size`、`+dpu.mmio_base/mmio_size` 及对应 `dpu.hH.*` 可调整，`+dpu.mem_policy=HOST_MEM_FIRST_FIT`
+使分配从低地址顺序放置。
 
 ## 编译
 

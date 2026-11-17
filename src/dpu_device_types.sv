@@ -121,4 +121,18 @@ function automatic bit dpu_same_domain_key(
            (lhs.segment_id == rhs.segment_id);
 endfunction
 
+// Uniform value in [0, upper_exclusive) from the simulator random stream, so the seed controls
+// reproducibility; rejection sampling avoids modulo bias for ranges larger than 32 bits.
+function automatic bit [63:0] dpu_random_below(input bit [63:0] upper_exclusive);
+    bit [63:0] candidate;
+    bit [63:0] cutoff;
+
+    if (upper_exclusive <= 1)
+        return '0;
+    cutoff = ('1 / upper_exclusive) * upper_exclusive;
+    do candidate = {$urandom(), $urandom()};
+    while (candidate >= cutoff);
+    return candidate % upper_exclusive;
+endfunction
+
 `endif // DPU_DEVICE_TYPES_SV
