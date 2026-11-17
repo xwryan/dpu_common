@@ -92,6 +92,9 @@ VTX `sport/sport_id` 和 VRX `dport/dport_id` 仍取真实 Host/Function 路由�
 | G2P | group_id | dpt、源 host_id |
 | SPWRR / TC_WEIGHT | net_id | `dpu.qsch.spwrr/tc_weight` |
 
+`dpu.qsch.vports`（默认128，1..1024）是 DUT vport 数（驱动从 GREG_INFO_VPORT_SPEC 读取，这里按参数给出）：
+N2G 前 vports 项给 VIO net，RDMA net 从 vports 开始，供 RDMA 的 QSCH 写项使用。
+
 `vio_dpu_cfg_seq` 先准备实际 ring 并调用 `set_queues()`，随后继承的
 `dpu_cfg_seq.configure_qsch()` 读取以上记录，经 `pcie_tl_reg_seq` 写管理 BAR。
 用户沿用已有 `dut_config` 注册/启动方式即可，env/base_test 不需要重复传 net/group。
