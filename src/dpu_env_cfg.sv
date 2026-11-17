@@ -20,6 +20,8 @@ class dpu_env_cfg extends uvm_object;
 	int unsigned			qsch_vports = 128;
 	// 每个有 RDMA 的 Host 的 QSCH DBQ（存 DB 的 Host 内存）2MB 页数（驱动 dbq_sd_per_host）。
 	int unsigned			qsch_dbq_pages = 4;
+	// RDMA vfid 位宽（驱动 RDMA_VFID_BIT_SIZE）：VNET 模式 RDMA_NET_MAP 下标为 {dport, vfid}；当前版本 128 个 VF 即 7 位。
+	int unsigned			qsch_rdma_vfid_bits = 7;
 	logic [31:0]			qsch_spwrr = 'hff;
 	logic [31:0]			qsch_tc_weight = 'h11111111;
 	// 配置前生成一次 Function→net；随机只改变调度编号，保留真实队列归属。
@@ -657,6 +659,7 @@ function void dpu_env_cfg::load_platform_params();
 		longint unsigned	mode_offset;
 		longint unsigned	vports;
 		longint unsigned	dbq_pages;
+		longint unsigned	rdma_vfid_bits;
 		longint unsigned	spwrr;
 		longint unsigned	tc_weight;
 		bit					configure_controls;
@@ -665,6 +668,7 @@ function void dpu_env_cfg::load_platform_params();
 		`aip_uint("dpu.qsch", longint unsigned, mode_offset, qsch_mode_offset)
 		`aip_uint("dpu.qsch", longint unsigned, vports, qsch_vports)
 		`aip_uint("dpu.qsch", longint unsigned, dbq_pages, qsch_dbq_pages)
+		`aip_uint("dpu.qsch", longint unsigned, rdma_vfid_bits, qsch_rdma_vfid_bits)
 		`aip_uint("dpu.qsch", longint unsigned, spwrr, qsch_spwrr)
 		`aip_uint("dpu.qsch", longint unsigned, tc_weight, qsch_tc_weight)
 		`aip_int("dpu.qsch", bit, configure_controls, qsch_configure_controls)
@@ -679,11 +683,15 @@ function void dpu_env_cfg::load_platform_params();
 		if (dbq_pages == 0 || dbq_pages > 512) begin
 			`uvm_fatal("PROJECT_CFG", "dpu.qsch.dbq_pages must be 1..512 (QSCH sd_tbl holds 512 entries)")
 		end
+		if (rdma_vfid_bits == 0 || rdma_vfid_bits > 8) begin
+			`uvm_fatal("PROJECT_CFG", "dpu.qsch.rdma_vfid_bits must be 1..8 (RDMA vf_id register fields are 8 bits)")
+		end
 
 		qsch_mode               = mode;
 		qsch_mode_offset        = mode_offset;
 		qsch_vports             = vports;
 		qsch_dbq_pages          = dbq_pages;
+		qsch_rdma_vfid_bits     = rdma_vfid_bits;
 		qsch_spwrr              = spwrr;
 		qsch_tc_weight          = tc_weight;
 		qsch_configure_controls = configure_controls;
@@ -2978,6 +2986,7 @@ function bit dpu_env_cfg::make_runtime_candidate(
 	candidate.qsch_mode_offset        = qsch_mode_offset;
 	candidate.qsch_vports             = qsch_vports;
 	candidate.qsch_dbq_pages          = qsch_dbq_pages;
+	candidate.qsch_rdma_vfid_bits     = qsch_rdma_vfid_bits;
 	candidate.qsch_spwrr              = qsch_spwrr;
 	candidate.qsch_tc_weight          = qsch_tc_weight;
 	candidate.qsch_topology           = qsch_topology;
@@ -3033,6 +3042,7 @@ function void dpu_env_cfg::apply_runtime_candidate(input dpu_env_cfg	candidate);
 	qsch_mode_offset        = candidate.qsch_mode_offset;
 	qsch_vports             = candidate.qsch_vports;
 	qsch_dbq_pages          = candidate.qsch_dbq_pages;
+	qsch_rdma_vfid_bits     = candidate.qsch_rdma_vfid_bits;
 	qsch_spwrr              = candidate.qsch_spwrr;
 	qsch_tc_weight          = candidate.qsch_tc_weight;
 	qsch_topology           = candidate.qsch_topology;
