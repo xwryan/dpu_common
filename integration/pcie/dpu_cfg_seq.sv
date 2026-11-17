@@ -2,6 +2,7 @@
 // 默认 body：Host0/PF0 声明为 AF 并读回状态 8，再配置 BDF、VIO/QSCH（MSI-X 按完成模式）；每批 Notify 成功后每个管理 BAR 写一次
 // ready=1（bank0）：VIO +0x80044，RDMA +0x80048。
 // Notify 只写实际队列对的有效项；未用槽位保持 DUT 复位值（05.png：type=3，lookup key/global_qid 全 1，reserved=0），seq 不写不读。
+// 配置最后对每条仍有未冲刷写的 RC 读一次（flush_writes），读完成即说明此前的 posted 写都已到 DUT。
 class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
 	`uvm_object_utils(dpu_cfg_seq)
 
@@ -11,6 +12,9 @@ class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
 	string			error_msg;
 	// 当前 seq 自上次成功 AF 状态读之后完成的完整 DWORD 写数；每次 start 独立计数。
 	protected int unsigned	writes_since_af_read;
+	// 按 RC sequencer 记录其上最后一笔之后还没有读的写；同 RC 的任一读完成即冲刷，删除记录。
+	protected dpu_bar_target_t	unflushed_target[string];
+	protected logic [63:0]		unflushed_offset[string];
 
 	extern function new(string	name = "dpu_cfg_seq");
 
@@ -28,6 +32,13 @@ class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
 
 	// 同步读一次 AF 状态并要求为 8（首次声明及每 100 笔完整 DWORD 写各一次，Completion 返回前不得继续写）；成功清写计数，不轮询。
 	extern protected task read_af_status(
+		output bit		ok,
+		output string	why
+	);
+
+	// 读不越过此前的 posted 写：每条有未冲刷写的 RC 读一次，管理 RC 读 AF 状态（须为 8），其他 RC 回读该 RC
+	// 最后写的 DWORD（不比对数据）；body 收尾调用，直接调用独立 configure_* 入口的 seq 也可自行调用。
+	extern task flush_writes(
 		output bit		ok,
 		output string	why
 	);
@@ -568,6 +579,8 @@ task dpu_cfg_seq::pre_start();
 	success              = 0;
 	error_msg            = "";
 	writes_since_af_read = 0;
+	unflushed_target.delete();
+	unflushed_offset.delete();
 	if (m_sequencer == null) begin
 		`uvm_fatal("PROJECT_CONFIG_SEQ", "start configuration on the project's PCIe RC sequencer")
 	end
@@ -673,6 +686,9 @@ task dpu_cfg_seq::body();
 		if (!completed_step("commit_vio_configuration", ok)) return;
 	end
 
+	flush_writes(ok, error_msg);
+	if (!completed_step("flush_writes", ok)) return;
+
 	success   = 1;
 	error_msg = "";
 	`uvm_info("PROJECT_CONFIG_SEQ", $sformatf("DUT configuration completed (readback=%0b)",
@@ -705,6 +721,31 @@ task dpu_cfg_seq::read_af_status(
 		return;
 	end
 	writes_since_af_read = 0;
+endtask
+
+task dpu_cfg_seq::flush_writes(
+	output bit		ok,
+	output string	why
+);
+	dpu_bar_target_t				management;
+	uvm_sequencer #(pcie_tl_tlp)	management_rc;
+	string							keys[$];
+	logic [127:0]					ignored;
+
+	ok = 0;
+	if (!cfg.bar_map.resolve_name("h0.pf0.bar0", management, why) ||
+		!get_rc(management, management_rc, why))
+		return;
+	foreach (unflushed_target[key]) keys.push_back(key);
+	foreach (keys[i]) begin
+		if (keys[i] == management_rc.get_full_name())
+			read_af_status(ok, why);
+		else
+			mmio(unflushed_target[keys[i]], 0, unflushed_offset[keys[i]], 4, '0, '0, ignored, ok, why, 0);
+		if (!ok) return;
+	end
+	ok  = 1;
+	why = "";
 endtask
 
 task dpu_cfg_seq::post_start();
@@ -1130,6 +1171,13 @@ task dpu_cfg_seq::mmio(
 	ok     = seq.status == PCIE_RW_OK;
 	why    = seq.error_msg;
 	result = seq.rdata;
+	if (ok && writing) begin
+		unflushed_target[sequencer.get_full_name()] = target;
+		unflushed_offset[sequencer.get_full_name()] = offset;
+	end else if (ok) begin
+		unflushed_target.delete(sequencer.get_full_name());
+		unflushed_offset.delete(sequencer.get_full_name());
+	end
 	// 当前表写均为完整4B；宽访问和部分/全屏蔽访问不冒充一个完整DWORD，也不额外拆包。
 	if (ok && writing && length == 4 && byte_skip_mask == 0 && seq.issued_tlps.size() != 0) begin
 		writes_since_af_read++;

@@ -24,6 +24,8 @@ DPU 按这些值生成表，不能再次分配或猜测 descriptor 地址。
 每批 Notify 成功后，每个管理 BAR 写一次 ready=1（bank0）：VIO 写 `+0x80044`，RDMA 写 `+0x80048`；
 空批次不写，失败停止。
 AF `+0x1010` 的写 magic/读状态8，以及每100次 DWORD 写同步读均保留。
+配置最后由 `flush_writes()` 对每条仍有未读写的 RC 读一次（管理 RC 读 AF 状态，其他 RC 回读最后写的 DWORD），
+读完成即说明配置写都已到 DUT，之后才进入下一个操作。
 
 当 `+dpu.driver_layouts=1`（默认值）时，参考布局同时覆盖 VIO/QSCH/BDF/MSI-X、RDMA
 Notify 和 RNET。RDMA Notify 使用 `0x80000 + 0xc000`、8 字节表项、256 项；RNET 使用
@@ -94,6 +96,8 @@ VTX `sport/sport_id` 和 VRX `dport/dport_id` 仍取真实 Host/Function 路由�
 
 `dpu.qsch.vports`（默认128，1..1024）是 DUT vport 数（驱动从 GREG_INFO_VPORT_SPEC 读取，这里按参数给出）：
 N2G 前 vports 项给 VIO net，RDMA net 从 vports 开始，供 RDMA 的 QSCH 写项使用。
+`dpu.qsch.dbq_pages`（默认4，1..512）是每个有 RDMA 的 Host 的 QSCH DBQ 2MB 页数（驱动 dbq_sd_per_host，从 GREG 读取；
+这里按参数给出），sd_tbl（`0xb20000`）按 `host×页数+j` 存这些页的物理地址。
 
 `vio_dpu_cfg_seq` 先准备实际 ring 并调用 `set_queues()`，随后继承的
 `dpu_cfg_seq.configure_qsch()` 读取以上记录，经 `pcie_tl_reg_seq` 写管理 BAR。

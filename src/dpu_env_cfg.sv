@@ -18,6 +18,8 @@ class dpu_env_cfg extends uvm_object;
 	logic [63:0]			qsch_mode_offset = 'hb001c0;
 	// DUT vport 数（驱动 dpu_get_vport_num）：N2G 前 vports 项给 VIO net，RDMA net 从 vports 开始。
 	int unsigned			qsch_vports = 128;
+	// 每个有 RDMA 的 Host 的 QSCH DBQ（存 DB 的 Host 内存）2MB 页数（驱动 dbq_sd_per_host）。
+	int unsigned			qsch_dbq_pages = 4;
 	logic [31:0]			qsch_spwrr = 'hff;
 	logic [31:0]			qsch_tc_weight = 'h11111111;
 	// 配置前生成一次 Function→net；随机只改变调度编号，保留真实队列归属。
@@ -591,6 +593,7 @@ function void dpu_env_cfg::load_platform_params();
 		longint unsigned	mode;
 		longint unsigned	mode_offset;
 		longint unsigned	vports;
+		longint unsigned	dbq_pages;
 		longint unsigned	spwrr;
 		longint unsigned	tc_weight;
 		bit					configure_controls;
@@ -598,6 +601,7 @@ function void dpu_env_cfg::load_platform_params();
 		`aip_uint("dpu.qsch", longint unsigned, mode, qsch_mode)
 		`aip_uint("dpu.qsch", longint unsigned, mode_offset, qsch_mode_offset)
 		`aip_uint("dpu.qsch", longint unsigned, vports, qsch_vports)
+		`aip_uint("dpu.qsch", longint unsigned, dbq_pages, qsch_dbq_pages)
 		`aip_uint("dpu.qsch", longint unsigned, spwrr, qsch_spwrr)
 		`aip_uint("dpu.qsch", longint unsigned, tc_weight, qsch_tc_weight)
 		`aip_int("dpu.qsch", bit, configure_controls, qsch_configure_controls)
@@ -609,10 +613,14 @@ function void dpu_env_cfg::load_platform_params();
 		if (vports == 0 || vports > 1024) begin
 			`uvm_fatal("PROJECT_CFG", "dpu.qsch.vports must be 1..1024 (N2G holds VIO then RDMA nets)")
 		end
+		if (dbq_pages == 0 || dbq_pages > 512) begin
+			`uvm_fatal("PROJECT_CFG", "dpu.qsch.dbq_pages must be 1..512 (QSCH sd_tbl holds 512 entries)")
+		end
 
 		qsch_mode               = mode;
 		qsch_mode_offset        = mode_offset;
 		qsch_vports             = vports;
+		qsch_dbq_pages          = dbq_pages;
 		qsch_spwrr              = spwrr;
 		qsch_tc_weight          = tc_weight;
 		qsch_configure_controls = configure_controls;
@@ -2884,6 +2892,7 @@ function bit dpu_env_cfg::make_runtime_candidate(
 	candidate.qsch_mode               = qsch_mode;
 	candidate.qsch_mode_offset        = qsch_mode_offset;
 	candidate.qsch_vports             = qsch_vports;
+	candidate.qsch_dbq_pages          = qsch_dbq_pages;
 	candidate.qsch_spwrr              = qsch_spwrr;
 	candidate.qsch_tc_weight          = qsch_tc_weight;
 	candidate.qsch_topology           = qsch_topology;
@@ -2938,6 +2947,7 @@ function void dpu_env_cfg::apply_runtime_candidate(input dpu_env_cfg	candidate);
 	qsch_mode               = candidate.qsch_mode;
 	qsch_mode_offset        = candidate.qsch_mode_offset;
 	qsch_vports             = candidate.qsch_vports;
+	qsch_dbq_pages          = candidate.qsch_dbq_pages;
 	qsch_spwrr              = candidate.qsch_spwrr;
 	qsch_tc_weight          = candidate.qsch_tc_weight;
 	qsch_topology           = candidate.qsch_topology;
