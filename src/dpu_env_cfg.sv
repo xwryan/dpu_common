@@ -423,6 +423,15 @@ function void dpu_env_cfg::load_params();
 	end
 
 	load_platform_params();
+	// 控制中断向量在 build 时按 msix.control_irq 分配；运行期重载不重新分配，只能改消息与编程范围。
+	placement_cfg.msix_control_functions.delete();
+	foreach (device_cfg.functions[f]) begin
+		string	name;
+
+		name = dpu_function_key_name(device_cfg.functions[f].key);
+		if (msix_policies.exists(name) && msix_policies[name].control_irq)
+			placement_cfg.msix_control_functions.push_back(device_cfg.functions[f].key);
+	end
 	load_function_routes();
 	if (driver_layouts) begin
 		use_driver_reference_layouts();
@@ -782,7 +791,8 @@ function void dpu_env_cfg::load_platform_params();
 				"interval_rate",
 				"interval_packets",
 				"self_mask",
-				"table_only_enable"
+				"table_only_enable",
+				"control_irq"
 			};
 			foreach (fields[j]) begin
 				raw = aip_cmdline#(longint unsigned)::get_cmdline_string(fields[j], paths[i]);
@@ -841,6 +851,10 @@ function void dpu_env_cfg::load_platform_params();
 						if (value > 1)
 							`uvm_fatal("PROJECT_CFG", "MSI-X table_only_enable must be boolean")
 						p.table_only_enable = value;
+					end
+					"control_irq": begin
+						if (value > 1) `uvm_fatal("PROJECT_CFG", "MSI-X control_irq must be boolean")
+						p.control_irq = value;
 					end
 					default:           ;
 				endcase
@@ -1714,6 +1728,48 @@ function bit dpu_env_cfg::select_msix_scope(
 			keys.push_back(pairs[p].service_key.function_key);
 		end
 	end
+	// 声明 msix.control_irq 的 Function：build 时须已分配控制向量，且每个控制向量都有未屏蔽的明确消息。
+	begin
+		dpu_msix_control_binding_t	controls[$];
+		bit							allocated[string];
+
+		resource_snapshot.list_msix_control_bindings(controls);
+		foreach (controls[c]) begin
+			string	name;
+			bit		found;
+
+			name = dpu_function_key_name(controls[c].function_key);
+			allocated[name] = 1;
+			if (!frozen_msix_policies.exists(name) || !frozen_msix_policies[name].control_irq) continue;
+			found = 0;
+			foreach (frozen_messages[m]) begin
+				if (!dpu_same_function_key(frozen_messages[m].owner, controls[c].function_key) ||
+					frozen_messages[m].local_vector != controls[c].local_msix_vector_id)
+					continue;
+				if (frozen_messages[m].global_vector != controls[c].global_msix_vector_id ||
+					frozen_messages[m].masked !== 1'b0 ||
+					$isunknown({frozen_messages[m].address, frozen_messages[m].data})) begin
+					why = "MSI-X control message is masked, unknown or disagrees with allocated vector";
+					return 0;
+				end
+				found = 1;
+			end
+			if (!found) begin
+				why = {"MSI-X control interrupts require explicit message address/data: ", name};
+				return 0;
+			end
+			if (!seen.exists(name)) begin
+				seen[name] = 1;
+				keys.push_back(controls[c].function_key);
+			end
+		end
+		foreach (frozen_msix_policies[name]) begin
+			if (frozen_msix_policies[name].control_irq && !allocated.exists(name)) begin
+				why = {"MSI-X control vectors were not allocated at build time: ", name};
+				return 0;
+			end
+		end
+	end
 	if (configure_public) begin
 		foreach (frozen_messages[m]) begin
 			string	name;
@@ -1823,6 +1879,7 @@ function bit dpu_env_cfg::materialize_messages(
 );
 	dpu_vio_qpair_binding_t			pairs[$];
 	dpu_af_extra_queue_binding_t	extras[$];
+	dpu_msix_control_binding_t		controls[$];
 
 	why = "resource snapshot missing";
 	if (resources == null) return 0;
@@ -1832,6 +1889,7 @@ function bit dpu_env_cfg::materialize_messages(
 	end
 	resources.list_vio_bindings(pairs);
 	resources.list_af_extra_queue_bindings(extras);
+	resources.list_msix_control_bindings(controls);
 	foreach (pairs[i])
 	if (!add_message(
 			pairs[i].service_key.function_key,
@@ -1845,6 +1903,14 @@ function bit dpu_env_cfg::materialize_messages(
 			extras[i].af_function_key,
 			extras[i].local_msix_vector_id,
 			extras[i].global_msix_vector_id,
+			why
+		))
+		return 0;
+	foreach (controls[i])
+	if (!add_message(
+			controls[i].function_key,
+			controls[i].local_msix_vector_id,
+			controls[i].global_msix_vector_id,
 			why
 		))
 		return 0;

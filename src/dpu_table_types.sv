@@ -375,8 +375,11 @@ typedef struct {
 } dpu_pfvf_drop_clear_cfg_t;
 
 // MSI-X 地址/数据模板独立于 VIO；存在标志区分显式零与未提供，PBA 容量必须明确。
+// control_irq：Function 使用控制中断（mailbox，AF 另有 MAC age / PTP stamp MSGQ）。build 时据此分配向量，
+// dut_config 把这些向量的消息纳入 MSI-X 编程范围。
 typedef struct {
 	bit							table_only_enable;
+	bit							control_irq;
 	bit							interval_present;
 	dpu_msix_interval_entry_t	interval_entry;
 	bit							self_mask_present;

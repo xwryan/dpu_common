@@ -122,4 +122,20 @@ typedef struct {
     int unsigned eth_queue_id;
 } dpu_af_extra_queue_binding_t;
 
+// 驱动 dpu_configure_msix_map 放在 LAN 向量之后的控制中断：每个 Function 一个 mailbox（local = LAN 数）；
+// AF 的 mailbox 在 AF 额外队列向量之后（DPU_AF_MAILBOX_INTR_NUM = DPU_AF_EXTRA_RES_NUM），随后是
+// MAC age 与 PTP stamp MSGQ（DPU_AF_MAC_AGE_MSGQ_INTR / DPU_AF_PTP_STAMP_MSGQ_INTR）。
+typedef enum int unsigned {
+    DPU_MSIX_CONTROL_MAILBOX,
+    DPU_MSIX_CONTROL_MAC_AGE_MSGQ,
+    DPU_MSIX_CONTROL_PTP_STAMP_MSGQ
+} dpu_msix_control_kind_e;
+
+typedef struct {
+    dpu_function_key_t function_key;
+    dpu_msix_control_kind_e kind;
+    int unsigned local_msix_vector_id;
+    int unsigned global_msix_vector_id;
+} dpu_msix_control_binding_t;
+
 `endif // DPU_PLACEMENT_TYPES_SV

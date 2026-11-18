@@ -169,6 +169,21 @@ host_mem manager，Host 之间地址可以重叠。内存、BAR 与 MSI-X 消息
 `+dpu.mem_base/mem_size`、`+dpu.mmio_base/mmio_size` 及对应 `dpu.hH.*` 可调整，`+dpu.mem_policy=HOST_MEM_FIRST_FIT`
 使分配从低地址顺序放置。
 
+### MSI-X 控制中断向量
+
+全局向量按驱动 `dpu_configure_msix_map` 的布局分配：每个 Function 先是 LAN 向量，随后是控制中断。
+
+| Function | 控制中断（local 向量） |
+|---|---|
+| 非 AF | mailbox = LAN 数 |
+| AF | 额外队列向量之后依次是 mailbox、MAC age MSGQ、PTP stamp MSGQ（LAN 数 + `af_extra_queue_count` + 0/1/2） |
+
+- 有 VIO qpair 的 Function 和 AF 总会分配向量块。没有 VIO qpair 的非 AF Function 只有声明 `+dpu.hH.pfP[.vfV].msix.control_irq=1` 才分配，它的 LAN 数为 0，只有 mailbox。
+- 分配结果在资源快照里，用 `list_msix_control_bindings()` 和 `get_msix_control_binding(key, kind, binding)` 查询。`kind` 取 `DPU_MSIX_CONTROL_MAILBOX/MAC_AGE_MSGQ/PTP_STAMP_MSGQ`。
+- 有消息模板（`msg_addr_base/msg_data_base` 等）的控制向量，消息与 VIO 消息一起进入 `frozen_messages`。
+- `control_irq=1` 的 Function 进入 `dut_config` 的 MSI-X 编程范围，每个控制向量都必须有未屏蔽的消息，否则 `select_msix_scope` 报错。
+- 运行期重载不重新分配向量。build 时没有分配的 Function 在重载时打开 `control_irq` 会被拒绝。
+
 ## 编译
 
 将 `DPU_COMMON_ROOT` 指向本仓库根目录、`AIP_CORE_ROOT` 指向 aip_core，先加入

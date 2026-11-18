@@ -432,6 +432,7 @@ class dpu_placement_normalizer extends uvm_object;
         normalized_plan.set_profiles(placement_cfg.profiles);
         normalized_plan.set_reservations(placement_cfg.reserved_global_qpair_ids,
                                         placement_cfg.reserved_global_qpair_ranges);
+        normalized_plan.set_msix_control_functions(placement_cfg.msix_control_functions);
         foreach (ordered_requests[request_index]) begin
             if ((request_index != 0) && (ordered_requests[request_index - 1].request_id == ordered_requests[request_index].request_id)) begin
                 set_failure(diagnostic, DPU_PLACE_STAGE_INPUT, DPU_PLACE_ERR_DUPLICATE_REQUEST,

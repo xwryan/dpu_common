@@ -174,6 +174,59 @@ module dpu_table_types_test;
 			`uvm_fatal("DPU_TABLE_TYPES", {"repaired publication did not commit: ", why})
 	endfunction
 
+	// 控制中断：AF 的 mailbox/MAC age/PTP stamp 有模板时生成消息、进入 MSI-X 编程范围；声明 control_irq 却有控制
+	// 向量缺消息时 select_msix_scope 失败，补齐后重新发布即可。
+	function automatic void test_control_irq_messages();
+		dpu_env_cfg					cfg;
+		dpu_device_snapshot			device;
+		dpu_resource_snapshot		resources;
+		dpu_bar_map					map;
+		dpu_msix_control_binding_t	controls[$];
+		dpu_cfg_scope				scope;
+		dpu_msix_message_t			message;
+		string						owner_name;
+		string						why;
+		int unsigned				found;
+
+		cfg = new("control_irq_cfg");
+		cfg.load_params();
+		resolve_fixture(cfg, device, resources, map);
+		resources.list_msix_control_bindings(controls);
+		if (controls.size() != 3)
+			`uvm_fatal("DPU_TABLE_TYPES", $sformatf("AF should own 3 control vectors, got %0d", controls.size()))
+		owner_name = dpu_function_key_name(controls[0].function_key);
+		cfg.msix_policies[owner_name].control_irq = 1;
+		foreach (controls[i]) begin
+			message.owner         = controls[i].function_key;
+			message.local_vector  = controls[i].local_msix_vector_id;
+			message.global_vector = 0;
+			message.address       = 64'hfee0_1000 + 4 * i;
+			message.data          = 32'h80 + i;
+			message.masked        = 0;
+			if (i != 2)
+				cfg.message_templates[owner_name][message.local_vector] = message;
+		end
+		if (!cfg.publish(device, resources, map, why))
+			`uvm_fatal("DPU_TABLE_TYPES", {"control_irq publication failed: ", why})
+		if (cfg.select_msix_scope(scope, why) || why == "")
+			`uvm_fatal("DPU_TABLE_TYPES", "control_irq with a control vector lacking a message was accepted")
+		cfg.message_templates[owner_name][message.local_vector] = message;
+		if (!cfg.publish(device, resources, map, why))
+			`uvm_fatal("DPU_TABLE_TYPES", {"control_irq republication failed: ", why})
+		found = 0;
+		foreach (cfg.frozen_messages[m])
+			foreach (controls[i])
+				if (dpu_same_function_key(cfg.frozen_messages[m].owner, controls[i].function_key) &&
+					cfg.frozen_messages[m].local_vector == controls[i].local_msix_vector_id &&
+					cfg.frozen_messages[m].global_vector == controls[i].global_msix_vector_id)
+					found++;
+		if (found != 3)
+			`uvm_fatal("DPU_TABLE_TYPES", $sformatf("expected 3 control messages, found %0d", found))
+		if (!cfg.select_msix_scope(scope, why) || scope == null || !scope.selects(controls[0].function_key) ||
+			cfg.msix_linear_records.size() != 3)
+			`uvm_fatal("DPU_TABLE_TYPES", {"control_irq scope or linear records are wrong: ", why})
+	endfunction
+
 	initial begin
 		dpu_env_cfg	cfg;
 
@@ -188,6 +241,7 @@ module dpu_table_types_test;
 		if (cfg.device_cfg == null || cfg.placement_cfg == null)
 			`uvm_fatal("DPU_TABLE_TYPES", "DPU authoring inputs missing")
 		test_publication();
+		test_control_irq_messages();
 		$display("DPU_TABLE_TYPES_PASS");
 		$finish;
 	end

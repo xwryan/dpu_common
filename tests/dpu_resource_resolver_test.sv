@@ -699,6 +699,115 @@ class dpu_resource_resolver_test extends uvm_test;
                 "snapshot accepted missing AF extra queue bindings")
     endfunction
 
+    // 全部 MSI-X 绑定（VIO、AF 额外队列、控制中断）的全局号互不重复。
+    function automatic bit msix_vectors_unique(input dpu_resource_snapshot resource_snapshot);
+        dpu_vio_qpair_binding_t pairs[$];
+        dpu_af_extra_queue_binding_t extras[$];
+        dpu_msix_control_binding_t controls[$];
+        bit used[int unsigned];
+
+        resource_snapshot.list_vio_bindings(pairs);
+        resource_snapshot.list_af_extra_queue_bindings(extras);
+        resource_snapshot.list_msix_control_bindings(controls);
+        foreach (pairs[index]) begin
+            if (used.exists(pairs[index].global_msix_vector_id)) return 0;
+            used[pairs[index].global_msix_vector_id] = 1;
+        end
+        foreach (extras[index]) begin
+            if (used.exists(extras[index].global_msix_vector_id)) return 0;
+            used[extras[index].global_msix_vector_id] = 1;
+        end
+        foreach (controls[index]) begin
+            if (used.exists(controls[index].global_msix_vector_id)) return 0;
+            used[controls[index].global_msix_vector_id] = 1;
+        end
+        return 1;
+    endfunction
+
+    // 控制中断向量按驱动布局：AF 的 mailbox/MAC age/PTP stamp 紧跟额外队列向量，有 VIO 的 Function 的 mailbox
+    // 紧跟 LAN，基址与本 Function 其他向量相同；无 VIO 的 Function 只有列入 msix_control_functions 才分配。
+    function void test_msix_control_bindings();
+        dpu_configuration_resolver coordinator;
+        dpu_device_cfg source_cfg;
+        dpu_resource_placement_cfg placement_cfg;
+        dpu_device_snapshot device_snapshot;
+        dpu_resource_snapshot resource_snapshot;
+        dpu_resource_snapshot scratch;
+        dpu_placement_diagnostic diagnostic;
+        dpu_msix_control_binding_t controls[$];
+        dpu_msix_control_binding_t b;
+        dpu_vio_qpair_binding_t pairs[$];
+        dpu_af_extra_queue_binding_t extras[$];
+        dpu_function_key_t pf0;
+        dpu_function_key_t pf1;
+        dpu_function_key_t pf2;
+        dpu_dut_caps caps;
+        int unsigned af_lan;
+        int unsigned af_base;
+
+        coordinator = dpu_configuration_resolver::type_id::create("control_coordinator");
+        source_cfg = make_coordinator_source();
+        source_cfg.functions.push_back(make_coordinator_function(2, DPU_FUNCTION_PF, 0));
+        placement_cfg = make_coordinator_placement();
+        pf0 = make_coordinator_function(0, DPU_FUNCTION_PF, 0).key;
+        pf1 = make_coordinator_function(1, DPU_FUNCTION_PF, 0).key;
+        pf2 = make_coordinator_function(2, DPU_FUNCTION_PF, 0).key;
+        if (!coordinator.resolve(source_cfg, placement_cfg, device_snapshot,
+                                 resource_snapshot, diagnostic))
+            `uvm_fatal("MSIX_CONTROL", diagnostic.message)
+        caps = device_snapshot.snapshot_dut_caps();
+        resource_snapshot.list_msix_control_bindings(controls);
+        resource_snapshot.list_vio_bindings(pairs);
+        resource_snapshot.list_af_extra_queue_bindings(extras);
+        // AF 三项 + pf1、vf7 各一个 mailbox；pf2 没有 VIO qpair，缺省不分配。
+        if ((controls.size() != 5) ||
+            resource_snapshot.get_msix_control_binding(pf2, DPU_MSIX_CONTROL_MAILBOX, b) ||
+            resource_snapshot.get_msix_control_binding(pf1, DPU_MSIX_CONTROL_MAC_AGE_MSGQ, b))
+            `uvm_fatal("MSIX_CONTROL", $sformatf("unexpected control bindings (%0d)", controls.size()))
+        af_lan = extras[0].local_msix_vector_id - extras[0].extra_queue_offset;
+        af_base = extras[0].global_msix_vector_id - extras[0].local_msix_vector_id;
+        for (int unsigned kind = 0; kind < 3; kind++) begin
+            if (!resource_snapshot.get_msix_control_binding(pf0, dpu_msix_control_kind_e'(kind), b) ||
+                (b.local_msix_vector_id != af_lan + caps.af_extra_queue_count + kind) ||
+                (b.global_msix_vector_id != af_base + b.local_msix_vector_id))
+                `uvm_fatal("MSIX_CONTROL", $sformatf("AF control vector %0d breaks the driver layout", kind))
+        end
+        foreach (pairs[index]) begin
+            if (dpu_same_function_key(pairs[index].service_key.function_key, pf0))
+                continue;
+            if (!resource_snapshot.get_msix_control_binding(pairs[index].service_key.function_key,
+                                                            DPU_MSIX_CONTROL_MAILBOX, b) ||
+                (b.local_msix_vector_id != pairs[index].local_msix_vector_id + 1) ||
+                (b.global_msix_vector_id - b.local_msix_vector_id !=
+                 pairs[index].global_msix_vector_id - pairs[index].local_msix_vector_id))
+                `uvm_fatal("MSIX_CONTROL", "mailbox vector does not follow the LAN prefix")
+        end
+        if (!msix_vectors_unique(resource_snapshot))
+            `uvm_fatal("MSIX_CONTROL", "MSI-X vectors overlap")
+
+        placement_cfg.msix_control_functions.push_back(pf2);
+        if (!coordinator.resolve(source_cfg, placement_cfg, device_snapshot,
+                                 resource_snapshot, diagnostic))
+            `uvm_fatal("MSIX_CONTROL", diagnostic.message)
+        if (!resource_snapshot.get_msix_control_binding(pf2, DPU_MSIX_CONTROL_MAILBOX, b) ||
+            (b.local_msix_vector_id != 0) || !msix_vectors_unique(resource_snapshot))
+            `uvm_fatal("MSIX_CONTROL", "listed Function without VIO qpairs did not get a mailbox vector")
+
+        placement_cfg.msix_control_functions = '{make_coordinator_function(3, DPU_FUNCTION_PF, 0).key};
+        if (coordinator.resolve(source_cfg, placement_cfg, device_snapshot, resource_snapshot,
+                                diagnostic) ||
+            (diagnostic.error_code != DPU_PLACE_ERR_INVALID_REQUEST))
+            `uvm_fatal("MSIX_CONTROL", "a control Function outside the topology was accepted")
+
+        scratch = dpu_resource_snapshot::type_id::create("control_duplicate");
+        b.function_key = pf1;
+        b.kind = DPU_MSIX_CONTROL_MAILBOX;
+        if (!scratch.add_msix_control_binding(b, diagnostic) ||
+            scratch.add_msix_control_binding(b, diagnostic))
+            `uvm_fatal("MSIX_CONTROL", "duplicate control binding was accepted")
+        `uvm_info("MSIX_CONTROL", "control vector layout checks passed", UVM_LOW)
+    endfunction
+
     function void test_reservation_union_publication();
         dpu_device_snapshot device_snapshot;
         dpu_service_key_t service_key;
@@ -996,6 +1105,7 @@ class dpu_resource_resolver_test extends uvm_test;
         test_reservation_union_publication();
         test_protocol_pair_index_is_independent_of_local_id();
         test_snapshot_rejects_missing_af_extra_bindings();
+        test_msix_control_bindings();
     endfunction
 endclass : dpu_resource_resolver_test
 

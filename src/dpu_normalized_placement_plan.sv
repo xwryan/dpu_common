@@ -48,6 +48,7 @@ class dpu_normalized_placement_plan extends uvm_object;
     protected dpu_resource_pool_config_t profiles[$];
     protected int unsigned reserved_global_qpair_ids[$];
     protected dpu_global_id_range_t reserved_global_qpair_ranges[$];
+    protected dpu_function_key_t msix_control_functions[$];
     protected bit frozen;
 
     function new(string name = "dpu_normalized_placement_plan");
@@ -293,6 +294,15 @@ class dpu_normalized_placement_plan extends uvm_object;
 
     function void list_reserved_global_qpair_ids(ref int unsigned ids[$]);
         ids = reserved_global_qpair_ids;
+    endfunction
+
+    function void set_msix_control_functions(input dpu_function_key_t keys[$]);
+        if (!frozen)
+            msix_control_functions = keys;
+    endfunction
+
+    function void list_msix_control_functions(ref dpu_function_key_t keys[$]);
+        keys = msix_control_functions;
     endfunction
 
     function void list_reserved_global_qpair_ranges(

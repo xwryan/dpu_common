@@ -426,6 +426,9 @@ class dpu_resource_placement_cfg extends uvm_object;
     dpu_vio_placement_request vio_requests[$];
     int unsigned reserved_global_qpair_ids[$];
     dpu_global_id_range_t reserved_global_qpair_ranges[$];
+    // 需要控制中断向量（mailbox，AF 另有 MSGQ）的 Function：没有 VIO qpair 的非 AF Function 只有列在这里才分配
+    // 向量块；由 dpu_env_cfg 按 dpu.*.msix.control_irq 填写。
+    dpu_function_key_t msix_control_functions[$];
 
     function new(string name = "dpu_resource_placement_cfg");
         super.new(name);
@@ -437,6 +440,7 @@ class dpu_resource_placement_cfg extends uvm_object;
         profiles = rhs.profiles;
         reserved_global_qpair_ids = rhs.reserved_global_qpair_ids;
         reserved_global_qpair_ranges = rhs.reserved_global_qpair_ranges;
+        msix_control_functions = rhs.msix_control_functions;
         vio_requests.delete();
         foreach (rhs.vio_requests[index]) begin
             if (rhs.vio_requests[index] == null) begin

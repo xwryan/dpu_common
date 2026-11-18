@@ -1,4 +1,4 @@
-// 资源解析结果快照：VIO qpair、AF extra queue、保留区间及反向索引；freeze 后只读。
+// 资源解析结果快照：VIO qpair、AF extra queue、控制中断向量、保留区间及反向索引；freeze 后只读。
 `ifndef DPU_RESOURCE_SNAPSHOT_SV
 `define DPU_RESOURCE_SNAPSHOT_SV
 
@@ -10,6 +10,7 @@ class dpu_resource_snapshot extends uvm_object;
     protected dpu_device_snapshot m_device_snapshot;
     protected dpu_vio_qpair_binding_t m_bindings[$];
     protected dpu_af_extra_queue_binding_t m_af_extra_bindings[$];
+    protected dpu_msix_control_binding_t m_msix_control_bindings[$];
     protected int unsigned m_request_index[string];
     protected int unsigned m_service_local_index[string];
     protected int unsigned m_service_virtio_pair_index[string];
@@ -222,6 +223,7 @@ class dpu_resource_snapshot extends uvm_object;
         output dpu_placement_diagnostic diagnostic
     );
         dpu_normalized_vio_request requests[$];
+        dpu_function_key_t control_functions[$];
         string why;
 
         copied = null;
@@ -237,6 +239,7 @@ class dpu_resource_snapshot extends uvm_object;
         source.list_reserved_global_qpair_ids(reservation_ids);
         source.list_reserved_global_qpair_ranges(reservation_ranges);
         source.list_resource_profiles(profiles);
+        source.list_msix_control_functions(control_functions);
         canonicalize_reservations(reservation_ids, reservation_ranges);
         copied = dpu_normalized_placement_plan::type_id::create(
             {get_name(), "_plan"});
@@ -244,6 +247,7 @@ class dpu_resource_snapshot extends uvm_object;
         copied.effective_device_capacity = source.effective_device_capacity;
         copied.set_profiles(profiles);
         copied.set_reservations(reservation_ids, reservation_ranges);
+        copied.set_msix_control_functions(control_functions);
         foreach (requests[index]) begin
             if (!copied.add_request(requests[index], why)) begin
                 set_failure(diagnostic, DPU_PLACE_ERR_INVALID_REQUEST,
@@ -667,6 +671,10 @@ class dpu_resource_snapshot extends uvm_object;
             function_local_global[function_local_key] =
                 m_af_extra_bindings[index].global_msix_vector_id;
         end
+        if (!validate_msix_control_bindings(device_snapshot, caps, expected_af_key,
+                                            msix_occupied, msix_owner, msix_local,
+                                            function_local_global, diagnostic))
+            return 0;
         begin
             dpu_normalized_vio_request requests[$];
             m_plan.list_requests(requests);
@@ -717,6 +725,90 @@ class dpu_resource_snapshot extends uvm_object;
                     end
                 end
             end
+        end
+        return 1;
+    endfunction
+
+    // 控制中断向量须按驱动布局紧跟 LAN 前缀（AF 在额外队列向量之后），与本 Function 其他向量同一基址，
+    // 全局号不与任何其他绑定重叠。LAN 数取本 Function VIO 绑定的最大 local 向量 + 1，没有 VIO 绑定为 0。
+    protected function bit validate_msix_control_bindings(
+        input dpu_device_snapshot device_snapshot,
+        input dpu_dut_caps caps,
+        input dpu_function_key_t af_key,
+        ref bit msix_occupied[DPU_MAX_GLOBAL_MSIX_VECTORS],
+        ref dpu_function_key_t msix_owner[DPU_MAX_GLOBAL_MSIX_VECTORS],
+        ref int unsigned msix_local[DPU_MAX_GLOBAL_MSIX_VECTORS],
+        ref int unsigned function_local_global[string],
+        output dpu_placement_diagnostic diagnostic
+    );
+        dpu_function_key_t keys[$];
+        int unsigned lan_count[string];
+        int unsigned base[string];
+        bit seen[string];
+
+        device_snapshot.list_functions(keys);
+        foreach (m_bindings[index]) begin
+            string name;
+            name = dpu_function_key_name(m_bindings[index].service_key.function_key);
+            if (!lan_count.exists(name) ||
+                (m_bindings[index].local_msix_vector_id + 1 > lan_count[name]))
+                lan_count[name] = m_bindings[index].local_msix_vector_id + 1;
+            base[name] = m_bindings[index].global_msix_vector_id -
+                         m_bindings[index].local_msix_vector_id;
+        end
+        foreach (m_af_extra_bindings[index])
+            base[dpu_function_key_name(af_key)] =
+                m_af_extra_bindings[index].global_msix_vector_id -
+                m_af_extra_bindings[index].local_msix_vector_id;
+        foreach (m_msix_control_bindings[index]) begin
+            dpu_msix_control_binding_t b;
+            string name;
+            string seen_key;
+            bit known;
+            bit is_af;
+            int unsigned lan;
+            int unsigned expected_local;
+
+            b = m_msix_control_bindings[index];
+            name = dpu_function_key_name(b.function_key);
+            known = 0;
+            foreach (keys[k])
+                if (dpu_same_function_key(keys[k], b.function_key))
+                    known = 1;
+            is_af = dpu_same_function_key(b.function_key, af_key);
+            lan = lan_count.exists(name) ? lan_count[name] : 0;
+            expected_local = lan + (is_af ? caps.af_extra_queue_count + int'(b.kind) : 0);
+            seen_key = $sformatf("%s:%0d", name, b.kind);
+            if (!known || (!is_af && (b.kind != DPU_MSIX_CONTROL_MAILBOX)) || seen.exists(seen_key) ||
+                (b.local_msix_vector_id != expected_local)) begin
+                set_failure(diagnostic, DPU_PLACE_ERR_INVALID_REQUEST,
+                            "MSI-X control binding disagrees with the driver vector layout");
+                diagnostic.set_function_context(b.function_key);
+                return 0;
+            end
+            seen[seen_key] = 1;
+            if ((b.local_msix_vector_id >= 128) ||
+                (b.global_msix_vector_id >= caps.global_msix_vector_count) ||
+                (b.global_msix_vector_id < b.local_msix_vector_id) ||
+                (base.exists(name) &&
+                 (b.global_msix_vector_id - b.local_msix_vector_id != base[name]))) begin
+                set_failure(diagnostic, DPU_PLACE_ERR_INVALID_REQUEST,
+                            "MSI-X control vector is outside the driver table domain or the function base");
+                diagnostic.set_function_context(b.function_key);
+                return 0;
+            end
+            base[name] = b.global_msix_vector_id - b.local_msix_vector_id;
+            if (msix_occupied[b.global_msix_vector_id]) begin
+                set_failure(diagnostic, DPU_PLACE_ERR_INVALID_REQUEST,
+                            "MSI-X control vector conflicts with another binding");
+                diagnostic.set_function_context(b.function_key);
+                return 0;
+            end
+            msix_occupied[b.global_msix_vector_id] = 1;
+            msix_owner[b.global_msix_vector_id] = b.function_key;
+            msix_local[b.global_msix_vector_id] = b.local_msix_vector_id;
+            function_local_global[$sformatf("%s:%0d", name, b.local_msix_vector_id)] =
+                b.global_msix_vector_id;
         end
         return 1;
     endfunction
@@ -821,6 +913,27 @@ class dpu_resource_snapshot extends uvm_object;
         return 1;
     endfunction
 
+    // 每个 (Function, kind) 一项；布局与冲突在 freeze 时核对。
+    function bit add_msix_control_binding(
+        input dpu_msix_control_binding_t binding,
+        output dpu_placement_diagnostic diagnostic
+    );
+        if (!mutable(diagnostic))
+            return 0;
+        foreach (m_msix_control_bindings[index]) begin
+            if (dpu_same_function_key(m_msix_control_bindings[index].function_key,
+                                      binding.function_key) &&
+                (m_msix_control_bindings[index].kind == binding.kind)) begin
+                set_failure(diagnostic, DPU_PLACE_ERR_INVALID_REQUEST,
+                            "resource snapshot has a duplicate MSI-X control binding");
+                diagnostic.set_function_context(binding.function_key);
+                return 0;
+            end
+        end
+        m_msix_control_bindings.push_back(binding);
+        return 1;
+    endfunction
+
     function bit freeze(
         input dpu_device_snapshot device_snapshot,
         output dpu_placement_diagnostic diagnostic
@@ -860,6 +973,36 @@ class dpu_resource_snapshot extends uvm_object;
         bindings.delete();
         if (m_frozen)
             bindings = m_af_extra_bindings;
+    endfunction
+
+    function void list_msix_control_bindings(
+        ref dpu_msix_control_binding_t bindings[$]
+    );
+        bindings.delete();
+        if (m_frozen)
+            bindings = m_msix_control_bindings;
+    endfunction
+
+    // Function 的某个控制中断向量；未分配（无 VIO qpair 的非 AF Function 没有列入 msix_control_functions、
+    // 非 AF 查 MSGQ、或 mailbox_msix_vectors 为 0）时返回 0。
+    function bit get_msix_control_binding(
+        input dpu_function_key_t function_key,
+        input dpu_msix_control_kind_e kind,
+        output dpu_msix_control_binding_t binding
+    );
+        dpu_msix_control_binding_t empty;
+
+        binding = empty;
+        if (!m_frozen)
+            return 0;
+        foreach (m_msix_control_bindings[index]) begin
+            if (dpu_same_function_key(m_msix_control_bindings[index].function_key, function_key) &&
+                (m_msix_control_bindings[index].kind == kind)) begin
+                binding = m_msix_control_bindings[index];
+                return 1;
+            end
+        end
+        return 0;
     endfunction
 
     function bit get_vio_binding(

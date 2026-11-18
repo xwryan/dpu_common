@@ -1,4 +1,5 @@
-// 资源分配解析：按 normalized placement plan 为 VIO service 分配 local/global qpair 与 MSI-X 向量，并记录失败诊断。
+// 资源分配解析：按 normalized placement plan 为 VIO service 分配 local/global qpair 与 MSI-X 向量（含控制中断向量），
+// 并记录失败诊断。
 `ifndef DPU_RESOURCE_RESOLVER_SV
 `define DPU_RESOURCE_RESOLVER_SV
 
@@ -75,6 +76,16 @@ class dpu_resource_resolver extends uvm_object;
         diagnostic.set_request_context(candidate.request_id);
         diagnostic.set_pair_context(candidate.pair.request_pair_index);
         diagnostic.set_service_context(candidate.pair.service_key);
+    endfunction
+
+    protected function bit listed_function(
+        input dpu_function_key_t keys[$],
+        input dpu_function_key_t key
+    );
+        foreach (keys[index])
+            if (dpu_same_function_key(keys[index], key))
+                return 1;
+        return 0;
     endfunction
 
     protected function bit same_service(
@@ -154,6 +165,7 @@ class dpu_resource_resolver extends uvm_object;
         int unsigned function_lan_msix_count[string];
         int unsigned function_msix_base[string];
         dpu_function_key_t function_keys[$];
+        dpu_function_key_t control_functions[$];
         dpu_function_key_t expected_af_key;
         dpu_bar_pair_lease_t expected_af_bar0;
         dpu_dut_caps caps;
@@ -421,6 +433,15 @@ class dpu_resource_resolver extends uvm_object;
         // Resolve local->global MSI-X vector bindings once while the snapshot is mutable: each function gets a
         // contiguous LAN-vector prefix, then mailbox and (AF) extra control vectors. Consumers must not infer a global vector from a binding ordinal.
         device_snapshot.list_functions(function_keys);
+        normalized_plan.list_msix_control_functions(control_functions);
+        foreach (control_functions[index]) begin
+            if (!listed_function(function_keys, control_functions[index])) begin
+                set_failure(diagnostic, DPU_PLACE_ERR_INVALID_REQUEST,
+                            "MSI-X control Function is not in the device topology");
+                diagnostic.set_function_context(control_functions[index]);
+                return 0;
+            end
+        end
         next_msix_vector = 0;
         foreach (function_keys[function_index]) begin
             function_name = dpu_function_key_name(function_keys[function_index]);
@@ -432,9 +453,11 @@ class dpu_resource_resolver extends uvm_object;
                         function_keys[function_index]))
                     function_qpair_count[function_name]++;
             end
+            // 没有 VIO qpair 的非 AF Function 只在要求控制中断时分配向量块（LAN 数为 0，只有 mailbox）。
             if ((function_qpair_count[function_name] == 0) &&
                 !dpu_same_function_key(function_keys[function_index],
-                                       expected_af_key))
+                                       expected_af_key) &&
+                !listed_function(control_functions, function_keys[function_index]))
                 continue;
             // A zero request keeps the one-vector-per-qpair default; an explicit count models the driver's
             // min(online_cpus, rxq) result and enables legal sharing.
@@ -550,6 +573,33 @@ class dpu_resource_resolver extends uvm_object;
                     binding, diagnostic)) begin
                 resource_snapshot = null;
                 return 0;
+            end
+        end
+        // 控制中断向量（dpu_msix_control_kind_e）：非 AF 的 mailbox 在 LAN 之后；AF 的 mailbox、MAC age、PTP stamp
+        // 依次在额外队列向量之后，定制能力下额外向量区放不下的项不登记。
+        foreach (function_keys[function_index]) begin
+            dpu_msix_control_binding_t binding;
+            bit is_af;
+            int unsigned lan;
+
+            function_name = dpu_function_key_name(function_keys[function_index]);
+            if (!function_msix_base.exists(function_name) || (caps.mailbox_msix_vectors == 0))
+                continue;
+            is_af = dpu_same_function_key(function_keys[function_index], expected_af_key);
+            lan = function_lan_msix_count[function_name];
+            binding.function_key = function_keys[function_index];
+            for (int unsigned kind = 0; kind < (is_af ? 3 : 1); kind++) begin
+                binding.kind = dpu_msix_control_kind_e'(kind);
+                binding.local_msix_vector_id = lan + (is_af ? caps.af_extra_queue_count + kind : 0);
+                if (is_af && (binding.local_msix_vector_id >=
+                              lan + caps.mailbox_msix_vectors + caps.af_extra_msix_vectors))
+                    break;
+                binding.global_msix_vector_id = function_msix_base[function_name] +
+                                                binding.local_msix_vector_id;
+                if (!resource_snapshot.add_msix_control_binding(binding, diagnostic)) begin
+                    resource_snapshot = null;
+                    return 0;
+                end
             end
         end
         if (!resource_snapshot.freeze(device_snapshot, diagnostic)) begin
