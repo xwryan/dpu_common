@@ -1,6 +1,6 @@
 // 公共 DUT 表配置 sequence：只依赖 dpu_env_cfg 与原生 PCIe TL，所有访问经 pcie_tl_reg_seq 发往实际目标 RC；ring/BAR 不归 seq 所有。
-// 默认 body：Host0/PF0 声明为 AF 并读回状态 8，再配置 BDF、VIO/QSCH（MSI-X 按完成模式）；每批 Notify 成功后每个管理 BAR 写一次
-// ready=1（bank0）：VIO +0x80044，RDMA +0x80048。
+// 默认 body：先预检 VIO 之前要写的全部公共记录（失败零 MMIO），Host0/PF0 声明为 AF 并读回状态 8，再配置 BDF、VIO/QSCH
+// （MSI-X 按完成模式）；每批 Notify 成功后每个管理 BAR 写一次 ready=1（bank0）：VIO +0x80044，RDMA +0x80048。
 // Notify 只写实际队列对的有效项；未用槽位保持 DUT 复位值（05.png：type=3，lookup key/global_qid 全 1，reserved=0），seq 不写不读。
 // 配置最后对每条仍有未冲刷写的 RC 读一次（flush_writes），读完成即说明此前的 posted 写都已到 DUT。
 class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
@@ -50,6 +50,24 @@ class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
 	extern protected function bit completed_step(
 		input string	step,
 		input bit		ok
+	);
+
+	// 首笔事务前验证完整 PCIe 目标（纯函数，不发事务）：每条记录 DWORD 对齐、直接访问且不跨 4KB；记录之间、与 AF
+	// 握手寄存器、批内 Notify 的使能寄存器及（with_msix_tail）MSI-X 单 bank 的未用尾部互不重叠，
+	// ctx/entry/使能完全相同的共享记录除外。派生 sequence 对自己要写的记录批次复用同一检查。
+	extern protected function bit validate_targets(
+		input dpu_table_item_t	batch[$],
+		input bit				with_msix_tail,
+		output string			why
+	);
+
+	// body 在 AF 声明前生成它在 VIO 之前要写的全部公共记录（configure_public 类别、BDF、MSI-X 及尾项；BAR 映射由
+	// 用户 hook 编码，不参与）并交给 validate_targets；任一失败时零 MMIO。
+	extern protected function bit preflight_public(
+		input dpu_cfg_scope	public_scope,
+		input dpu_cfg_scope	bdf_scope,
+		input dpu_cfg_scope	msix_scope,
+		output string		why
 	);
 
 	// offset 相对所选 Function 的真实 BAR（失败不回退默认窗口）；校验四态输入与完整范围，posted 成功仅表示已发送。
@@ -607,6 +625,9 @@ task dpu_cfg_seq::body();
 	ok = cfg.select_msix_scope(msix_scope, error_msg);
 	if (!completed_step("select_msix_scope", ok)) return;
 
+	ok = preflight_public(public_scope, bdf_scope, msix_scope, error_msg);
+	if (!completed_step("preflight_public", ok)) return;
+
 	declare_af(ok, error_msg);
 	if (!completed_step("declare_af", ok)) return;
 
@@ -763,6 +784,203 @@ function bit dpu_cfg_seq::completed_step(
 	end
 
 	return ok;
+endfunction
+
+function bit dpu_cfg_seq::validate_targets(
+	input dpu_table_item_t	batch[$],
+	input bit				with_msix_tail,
+	output string			why
+);
+	// 只用于一次预检的物理跨度；record_index=-1 标识不可被任何表覆盖的握手/使能寄存器或尾部。
+	typedef struct {
+		int unsigned	host;
+		int unsigned	segment;
+		bit [63:0]		first;
+		bit [63:0]		last;
+		int				record_index;
+		string			name;
+	} span_t;
+
+	uvm_sequencer #(pcie_tl_tlp)	rc;
+	dpu_bar_target_t				af_target;
+	bit [63:0]						address;
+	bit								seen_enable[string];
+	span_t							spans[$];
+	span_t							span;
+
+	if (!cfg.bar_map.resolve_name("h0.pf0.bar0", af_target, why) ||
+		!get_rc(af_target, rc, why) ||
+		!cfg.bar_map.check_range(af_target, 64'h1010, 4, address, why))
+		return 0;
+	span.host         = af_target.function_key.host_id;
+	span.segment      = af_target.pcie_id.domain.segment_id;
+	span.first        = address;
+	span.last         = address + 3;
+	span.record_index = -1;
+	span.name         = "AF handshake";
+	spans.push_back(span);
+
+	foreach (batch[i]) begin
+		string	enable_key;
+
+		if (!(batch[i].ctx.kind inside {DPU_TABLE_NOTIFY, DPU_TABLE_RDMA_NOTIFY})) continue;
+		enable_key = {batch[i].ctx.target.canonical_name, ":", batch[i].ctx.kind.name()};
+		if (seen_enable.exists(enable_key)) continue;
+		if (!cfg.bar_map.check_range(batch[i].ctx.target, notify_ready_offset(batch[i].ctx.kind), 4,
+									 address, why))
+			return 0;
+		seen_enable[enable_key] = 1;
+		span.host         = batch[i].ctx.target.function_key.host_id;
+		span.segment      = batch[i].ctx.target.pcie_id.domain.segment_id;
+		span.first        = address;
+		span.last         = address + 3;
+		span.record_index = -1;
+		span.name         = "Notify enable";
+		foreach (spans[j]) begin
+			if (span.host == spans[j].host && span.segment == spans[j].segment &&
+				span.first <= spans[j].last && spans[j].first <= span.last) begin
+				why = "Notify enable overlaps an AF/enable reserved span";
+				return 0;
+			end
+		end
+		spans.push_back(span);
+	end
+
+	foreach (batch[i]) begin
+		if (!get_rc(batch[i].ctx.target, rc, why) ||
+			!cfg.bar_map.check_range(batch[i].ctx.target, batch[i].ctx.byte_offset,
+									 batch[i].ctx.layout.entry_bytes, address, why))
+			return 0;
+		if (batch[i].ctx.byte_offset[1:0] != 0 || address[1:0] != 0 ||
+			batch[i].ctx.layout.indirect || address[11:0] + batch[i].ctx.layout.entry_bytes > 4096) begin
+			why = "public tables require DWORD-aligned direct accesses contained within 4KB";
+			return 0;
+		end
+		span.host         = batch[i].ctx.target.function_key.host_id;
+		span.segment      = batch[i].ctx.target.pcie_id.domain.segment_id;
+		span.first        = address;
+		span.last         = address + batch[i].ctx.layout.entry_bytes - 1;
+		span.record_index = i;
+		span.name         = batch[i].ctx.kind.name();
+		foreach (spans[j]) begin
+			int	previous;
+
+			if (span.host != spans[j].host || span.segment != spans[j].segment ||
+				span.first > spans[j].last || spans[j].first > span.last)
+				continue;
+			previous = spans[j].record_index;
+			// 与 remember_record 一致：ctx/entry/enable 完全相同的共享记录可以合并消费者。
+			// 不用 owner 相等代替物理语义一致，也不因起始地址不同漏掉部分重叠。
+			if (previous >= 0 && batch[i].ctx === batch[previous].ctx &&
+				batch[i].entry === batch[previous].entry &&
+				batch[i].enable_mask === batch[previous].enable_mask &&
+				batch[i].enable_value === batch[previous].enable_value)
+				continue;
+			why = $sformatf("configuration span overlap: %s [%h:%h] with %s [%h:%h]",
+							span.name, span.first, span.last, spans[j].name, spans[j].first, spans[j].last);
+			return 0;
+		end
+		spans.push_back(span);
+	end
+
+	// process_msix_tail 从全局紧凑目录末行之后写到 capacity（不只本 scope 的记录）：先验证整个 bank 的
+	// 算术/租约和每行 8B 读回边界；冲突检查只加入未用尾部，以免把有效 linear 行与所属 bank 误判为重叠。
+	if (with_msix_tail) begin
+		dpu_table_ctx_t	ctx;
+		bit [64:0]		bank_offset;
+		bit [64:0]		bank_last;
+		bit [63:0]		bank_address;
+		bit [63:0]		row_address;
+		int unsigned	used_rows;
+
+		used_rows = cfg.msix_linear_records.size();
+		if (used_rows == 0) begin
+			why = "MSI-X linear directory is empty before tail preflight";
+			return 0;
+		end
+		ctx = cfg.msix_linear_records[0].ctx;
+		if (ctx.layout.capacity > 2048 || used_rows > ctx.layout.capacity) begin
+			why = "MSI-X linear directory exceeds the single-bank layout";
+			return 0;
+		end
+		bank_offset = {1'b0, ctx.layout.module_offset} + {1'b0, ctx.layout.table_offset};
+		bank_last   = bank_offset + 65'(ctx.layout.capacity) * 8 - 1;
+		if (bank_offset[64] || bank_last[64]) begin
+			why = "MSI-X linear bank offset/span overflows 64 bits";
+			return 0;
+		end
+		if (!get_rc(ctx.target, rc, why) ||
+			!cfg.bar_map.check_range(ctx.target, bank_offset[63:0], 64'(ctx.layout.capacity) * 8,
+									 bank_address, why))
+			return 0;
+		if (ctx.layout.indirect || ctx.layout.entry_bytes != 8 ||
+			bank_offset[1:0] != 0 || bank_address[1:0] != 0) begin
+			why = "MSI-X linear bank requires direct DWORD-aligned 8-byte rows";
+			return 0;
+		end
+		for (int unsigned	row = used_rows; row < ctx.layout.capacity; row++) begin
+			row_address = bank_address + 64'(row) * 8;
+			if (row_address[11:0] + 8 > 4096) begin
+				why = "MSI-X tail readback crosses a 4KB boundary";
+				return 0;
+			end
+		end
+		if (used_rows < ctx.layout.capacity) begin
+			span.host         = ctx.target.function_key.host_id;
+			span.segment      = ctx.target.pcie_id.domain.segment_id;
+			span.first        = bank_address + 64'(used_rows) * 8;
+			span.last         = bank_address + 64'(ctx.layout.capacity) * 8 - 1;
+			span.record_index = -1;
+			span.name         = "MSI-X unused tail";
+			foreach (spans[j]) begin
+				if (span.host == spans[j].host && span.segment == spans[j].segment &&
+					span.first <= spans[j].last && spans[j].first <= span.last) begin
+					why = $sformatf("configuration span overlap: %s [%h:%h] with %s [%h:%h]",
+									span.name, span.first, span.last, spans[j].name, spans[j].first, spans[j].last);
+					return 0;
+				end
+			end
+		end
+	end
+	return 1;
+endfunction
+
+function bit dpu_cfg_seq::preflight_public(
+	input dpu_cfg_scope	public_scope,
+	input dpu_cfg_scope	bdf_scope,
+	input dpu_cfg_scope	msix_scope,
+	output string		why
+);
+	dpu_table_kind_e	public_kinds[$] = '{DPU_TABLE_AF, DPU_TABLE_PFVF, DPU_TABLE_COMPLETION_BDF, DPU_TABLE_PREFIX};
+	dpu_table_kind_e	msix_kinds[$]   = '{
+		DPU_TABLE_MSIX_LINEAR,
+		DPU_TABLE_MSIX_INFO,
+		DPU_TABLE_MSIX_INTERVAL,
+		DPU_TABLE_MSIX_CONTROL,
+		DPU_TABLE_MSIX_TABLE,
+		DPU_TABLE_MSIX_FUNCTION
+	};
+	dpu_table_item_t	batch[$];
+	dpu_table_item_t	records[$];
+
+	if (cfg.configure_public) begin
+		foreach (public_kinds[k]) begin
+			if (public_kinds[k] == DPU_TABLE_AF && !cfg.frozen_layouts.exists(DPU_TABLE_AF)) continue;
+			if (!cfg.public_records(public_kinds[k], public_scope, batch, why)) return 0;
+			foreach (batch[b]) records.push_back(batch[b]);
+		end
+	end
+	if (bdf_scope != null) begin
+		if (!cfg.public_records(DPU_TABLE_BDF, bdf_scope, batch, why)) return 0;
+		foreach (batch[b]) records.push_back(batch[b]);
+	end
+	if (msix_scope != null) begin
+		foreach (msix_kinds[k]) begin
+			if (!cfg.public_records(msix_kinds[k], msix_scope, batch, why)) return 0;
+			foreach (batch[b]) records.push_back(batch[b]);
+		end
+	end
+	return validate_targets(records, msix_scope != null, why);
 endfunction
 
 task dpu_cfg_seq::configure_bar_table(
