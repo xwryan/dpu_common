@@ -86,6 +86,57 @@ class dpu_dut_caps extends uvm_object;
             bar_profiles.push_back(rhs.bar_profiles[index]);
     endfunction
 
+    // 两份能力逐字段相等：全部数值字段，BAR profile 按 kind/role 对应、与顺序无关（validate 保证 kind/role 唯一）。
+    // 不等时 why 给出第一个不同的字段。
+    function bit equals(input dpu_dut_caps rhs, output string why);
+        string names[11] = '{"max_hosts", "max_pfs_per_host", "max_vfs_per_pf", "max_functions",
+            "global_msix_vector_count", "mailbox_msix_vectors", "af_extra_msix_vectors",
+            "af_extra_queue_count", "vio_global_qpair_count", "max_vio_net_qpairs_per_device",
+            "vio_notify_entries_per_bank"};
+        int unsigned lhs_values[11];
+        int unsigned rhs_values[11];
+
+        why = "the other DUT capability object is null";
+        if (rhs == null)
+            return 0;
+        lhs_values = '{max_hosts, max_pfs_per_host, max_vfs_per_pf, max_functions,
+            global_msix_vector_count, mailbox_msix_vectors, af_extra_msix_vectors,
+            af_extra_queue_count, vio_global_qpair_count, max_vio_net_qpairs_per_device,
+            vio_notify_entries_per_bank};
+        rhs_values = '{rhs.max_hosts, rhs.max_pfs_per_host, rhs.max_vfs_per_pf, rhs.max_functions,
+            rhs.global_msix_vector_count, rhs.mailbox_msix_vectors, rhs.af_extra_msix_vectors,
+            rhs.af_extra_queue_count, rhs.vio_global_qpair_count, rhs.max_vio_net_qpairs_per_device,
+            rhs.vio_notify_entries_per_bank};
+        foreach (names[index]) begin
+            if (lhs_values[index] != rhs_values[index]) begin
+                why = $sformatf("%s differs: %0d vs %0d", names[index], lhs_values[index],
+                                rhs_values[index]);
+                return 0;
+            end
+        end
+        if (bar_profiles.size() != rhs.bar_profiles.size()) begin
+            why = $sformatf("BAR profile count differs: %0d vs %0d", bar_profiles.size(),
+                            rhs.bar_profiles.size());
+            return 0;
+        end
+        foreach (bar_profiles[index]) begin
+            dpu_bar_profile_t other;
+            string ignored;
+
+            if (!rhs.lookup_bar_profile(bar_profiles[index].kind, bar_profiles[index].role,
+                                        other, ignored) ||
+                (other.even_bar_id != bar_profiles[index].even_bar_id) ||
+                (other.size != bar_profiles[index].size) ||
+                (other.alignment != bar_profiles[index].alignment)) begin
+                why = $sformatf("BAR profile for function kind %0d role %0d differs",
+                                bar_profiles[index].kind, bar_profiles[index].role);
+                return 0;
+            end
+        end
+        why = "";
+        return 1;
+    endfunction
+
     function bit lookup_bar_profile(
         input dpu_function_kind_e kind,
         input dpu_bar_role_e role,

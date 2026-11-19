@@ -794,6 +794,40 @@ class dpu_device_resolver_test extends uvm_test;
         expect_valid(resolver, source);
     endfunction
 
+    // One compare for every field: each scalar and each BAR profile difference is reported by name,
+    // profile order does not matter, and a copy compares equal.
+    function void test_caps_equals();
+        dpu_dut_caps lhs;
+        dpu_dut_caps rhs;
+        dpu_bar_profile_t first;
+        string why;
+
+        lhs = dpu_dut_caps::type_id::create("lhs_caps");
+        rhs = dpu_dut_caps::type_id::create("rhs_caps");
+        rhs.copy_from(lhs);
+        if (!lhs.equals(rhs, why) || (why != ""))
+            `uvm_fatal("RESOLVER_TEST", {"copied capabilities differ: ", why})
+        first = rhs.bar_profiles.pop_front();
+        rhs.bar_profiles.push_back(first);
+        if (!lhs.equals(rhs, why))
+            `uvm_fatal("RESOLVER_TEST", {"BAR profile order changed the compare: ", why})
+        rhs.af_extra_queue_count = lhs.af_extra_queue_count - 1;
+        if (lhs.equals(rhs, why) || !uvm_is_match("af_extra_queue_count differs*", why))
+            `uvm_fatal("RESOLVER_TEST", {"AF extra queue count difference missed: ", why})
+        rhs.copy_from(lhs);
+        rhs.mailbox_msix_vectors = 2;
+        if (lhs.equals(rhs, why) || !uvm_is_match("mailbox_msix_vectors differs*", why))
+            `uvm_fatal("RESOLVER_TEST", {"mailbox vector difference missed: ", why})
+        rhs.copy_from(lhs);
+        rhs.bar_profiles[1].size = rhs.bar_profiles[1].size * 2;
+        if (lhs.equals(rhs, why) || !uvm_is_match("BAR profile for function kind*", why))
+            `uvm_fatal("RESOLVER_TEST", {"BAR profile size difference missed: ", why})
+        rhs.copy_from(lhs);
+        void'(rhs.bar_profiles.pop_back());
+        if (lhs.equals(rhs, why) || lhs.equals(null, why))
+            `uvm_fatal("RESOLVER_TEST", "missing BAR profile or null capabilities compared equal")
+    endfunction
+
     // Catches a resolver change that accepts duplicate host identities.
     function void test_duplicate_host_key(input dpu_device_resolver resolver);
         dpu_device_cfg cfg;
@@ -1632,6 +1666,7 @@ class dpu_device_resolver_test extends uvm_test;
         test_host_address_constraints(resolver);
         test_real_dut_bar_profile_literals(resolver);
         test_copy_from_is_deep(resolver);
+        test_caps_equals();
         test_duplicate_host_key(resolver);
         test_duplicate_pcie_domain_key(resolver);
         test_function_domain_other_host(resolver);
