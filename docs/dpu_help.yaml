@@ -9,9 +9,9 @@
 # 全大写的键（如 TAG_BIT、AIP_TCL）是原生 plusarg，写成 +NAME=值，不支持 set_param；<命令>.<参数> 形式的键（如
 # vio_tx.count、vio_rx_refill.qid）只是 Tcl 命令参数的记法，在命令行上写成 vio_tx count=100。
 #
-# 对应代码：VPS ~/Documents 的本地提交（2026-11-19），* 表示该提交尚未推送到 GitHub。
-#   aip_core 02f421e       dpu_common 0340e68    host_mem 830713f     pcie_work adb22be*     inter_pcie 46a30a6
-#   net_packet da057fa     virtio_work 3abdb2d   rdma_work 446ca67    eth_seg_agent 1da2ba7  dpu_queue_work cc1c2c2
+# 对应代码：VPS ~/Documents 中的以下提交（2026-11-19，均已推送到 GitHub）。
+#   aip_core 02f421e       dpu_common 0340e68    host_mem 830713f     pcie_work adb22be      inter_pcie 46a30a6
+#   net_packet da057fa     virtio_work 3abdb2d   rdma_work aa08e9f    eth_seg_agent 1da2ba7  dpu_queue_work cc1c2c2
 #   flow_control 877eefc
 # host_mem 由第 9 节的 dpu.mem_* 配置，自身不读参数；flow_control 不读参数；simflow 是运行流程工具，不在本文范围。
 #
