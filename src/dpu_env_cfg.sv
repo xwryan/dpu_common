@@ -129,7 +129,20 @@ class dpu_env_cfg extends uvm_object;
 
 	// 无 PCIe IP 的参考接线：各 Host PF0 / VF=-1 / wire requester=0 / vport=0，仅为 Intel sideband/DMA 软件路由，不代表已写 BDF/PFVF 表。
 	// 显式 policy 优先作为缺省值，CLI 可覆盖字段；其余 PF/VF 不猜 requester/Intel 身份。
+	// 可选 pfvf（DUT pfvf_id，0..1023）与 PF 的 first_vf_offset（0..1023）只在存有路由策略的 Function 上有效，缺省 0，
+	// 不按拓扑推导编号。
 	extern protected function void load_function_routes();
+
+	// Function 的参数路径 dpu.hH.pfP[.vfV]。
+	extern static function string function_param_path(input dpu_function_key_t	key);
+
+	// MSI-X 线性查找键是 Host/pfvf/local 向量：同一 Host 上拥有 MSI-X 消息的 Function 的 pfvf 必须互不相同。
+	// 缺路由策略的 Function 留给生成 MSI-X 目录时报错。publish 与运行期候选在冻结消息前调用。
+	extern protected function bit check_msix_pfvf(
+		input dpu_msix_message_t	catalog[$],
+		input dpu_function_policy_t	policies[string],
+		output string				why
+	);
 
 	// 按实际 TX 队列为每 Function 生成一个 net，同源 Host+同目的 dpt 共享 group（VNET lvl2 为源 Host）；结果稳定，释放/重载后才重新生成。
 	// 目的节点编号：ETH 从 0 开始，HOST 紧随实际 ETH 数；纯 RX/空配置不依赖 QSCH 参数。
@@ -1275,6 +1288,7 @@ function void dpu_env_cfg::load_function_routes();
 		string					path;
 		bit						provided;
 		bit [3:0]				fields_present;
+		bit						numbering_present;
 
 		owner    = device_cfg.functions[f].key;
 		name     = dpu_function_key_name(owner);
@@ -1287,11 +1301,11 @@ function void dpu_env_cfg::load_function_routes();
 		end
 
 		if (!function_policies.exists(name)) policy.bdf_index = policy.vport;
-		fields_present = provided ? 4'hf : 0;
-		path           = $sformatf("dpu.h%0d.pf%0d", owner.host_id, owner.pf_id);
-		if (owner.kind == DPU_FUNCTION_VF) path = {path, $sformatf(".vf%0d", owner.vf_id)};
+		fields_present    = provided ? 4'hf : 0;
+		numbering_present = 0;
+		path              = function_param_path(owner);
 		begin
-			string	fields[$] = '{"requester", "intel_pf", "intel_vf", "vport"};
+			string	fields[$] = '{"requester", "intel_pf", "intel_vf", "vport", "pfvf", "first_vf_offset"};
 
 			foreach (fields[i]) begin
 				string			raw;
@@ -1299,12 +1313,14 @@ function void dpu_env_cfg::load_function_routes();
 
 				raw = aip_cmdline#(longint signed)::get_cmdline_string(fields[i], path);
 				if (raw == "") continue;
+				if (i == 5 && owner.kind == DPU_FUNCTION_VF)
+					`uvm_fatal("PROJECT_CFG", {path, ".first_vf_offset is set on the PF only"})
 				aip_cmdline#(longint signed)::get_single_value(fields[i], path, 0, value);
 				if ((i == 0 && (value < 0 || value > 65535)) ||
 					(i == 1 && (value < 0 || value > 7)) ||
 					(i == 2 && ((owner.kind == DPU_FUNCTION_PF && value != -1) ||
 						(owner.kind == DPU_FUNCTION_VF && (value < 0 || value > 2047)))) ||
-					(i == 3 && (value < 0 || value > 1023))) begin
+					(i >= 3 && (value < 0 || value > 1023))) begin
 					`uvm_fatal("PROJECT_CFG", {path, ".", fields[i],
 											   " is outside the Intel/VIO field range"})
 				end
@@ -1314,8 +1330,11 @@ function void dpu_env_cfg::load_function_routes();
 					1: policy.intel_pf = value;
 					2: policy.intel_vf = value;
 					3: policy.vport = value;
+					4: policy.pfvf = value;
+					5: policy.first_vf_offset = value;
 				endcase
-				fields_present[i] = 1;
+				if (i < 4) fields_present[i] = 1;
+				else numbering_present = 1;
 			end
 		end
 		begin
@@ -1334,12 +1353,43 @@ function void dpu_env_cfg::load_function_routes();
 				policy.bdf_index = value;
 			end
 		end
-		if (fields_present != 0 && fields_present != 4'hf) begin
+		if ((fields_present != 0 || numbering_present) && fields_present != 4'hf) begin
 			`uvm_fatal("PROJECT_CFG", {
 					   path, " requires requester, intel_pf, intel_vf and vport together"})
 		end
 		if (fields_present == 4'hf) function_policies[name] = policy;
 	end
+endfunction
+
+function string dpu_env_cfg::function_param_path(input dpu_function_key_t	key);
+	function_param_path = $sformatf("dpu.h%0d.pf%0d", key.host_id, key.pf_id);
+	if (key.kind == DPU_FUNCTION_VF) function_param_path = {function_param_path, $sformatf(".vf%0d", key.vf_id)};
+endfunction
+
+function bit dpu_env_cfg::check_msix_pfvf(
+	input dpu_msix_message_t	catalog[$],
+	input dpu_function_policy_t	policies[string],
+	output string				why
+);
+	dpu_function_key_t	owner_by_slot[string];
+
+	foreach (catalog[m]) begin
+		string	name;
+		string	slot;
+
+		name = dpu_function_key_name(catalog[m].owner);
+		if (!policies.exists(name)) continue;
+		slot = $sformatf("%0d:%0d", catalog[m].owner.host_id, policies[name].pfvf);
+		if (owner_by_slot.exists(slot) && !dpu_same_function_key(owner_by_slot[slot], catalog[m].owner)) begin
+			why = $sformatf("%s and %s share pfvf %0d; give each MSI-X Function its DUT pfvf_id (%s.pfvf)",
+							function_param_path(owner_by_slot[slot]), function_param_path(catalog[m].owner),
+							policies[name].pfvf, function_param_path(catalog[m].owner));
+			return 0;
+		end
+		owner_by_slot[slot] = catalog[m].owner;
+	end
+	why = "";
+	return 1;
 endfunction
 
 function bit dpu_env_cfg::qsch_candidates(
@@ -3106,6 +3156,7 @@ function bit dpu_env_cfg::make_runtime_candidate(
 		return 0;
 	end
 	if (!candidate.materialize_messages(resource_snapshot, why)) return 0;
+	if (!check_msix_pfvf(candidate.messages, frozen_functions, why)) return 0;
 	candidate.frozen_messages      = candidate.messages;
 	candidate.frozen_layouts       = candidate.table_layouts;
 	candidate.frozen_policies      = candidate.vio_policies;
@@ -3363,6 +3414,7 @@ function bit dpu_env_cfg::publish(
 			return 0;
 		end
 	end
+	if (!check_msix_pfvf(candidate.messages, function_policies, why)) return 0;
 	// 此后没有可能失败的分支；一起发布身份、生成消息和公共表冻结值。
 	device_snapshot      = device;
 	resource_snapshot    = resources;
