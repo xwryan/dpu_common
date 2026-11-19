@@ -11,7 +11,7 @@
 #
 # 对应代码：各仓库的以下提交（2026-11-19；带 * 的是尚未推送到 GitHub 的本地提交）。
 #   aip_core 02f421e       dpu_common 0340e68    host_mem 830713f     pcie_work adb22be      inter_pcie 46a30a6
-#   net_packet da057fa     virtio_work 7b43e4f*  rdma_work 9ab1ca5*   eth_seg_agent 1da2ba7  dpu_queue_work cc1c2c2
+#   net_packet da057fa     virtio_work df0d923*  rdma_work a1408da*   eth_seg_agent 1da2ba7  dpu_queue_work cc1c2c2
 #   flow_control 877eefc
 # host_mem 由第 9 节的 dpu.mem_* 配置，自身不读参数；flow_control 不读参数；simflow 是运行流程工具，不在本文范围。
 #
@@ -346,7 +346,7 @@ TAG_BIT: 8                                         # 示例；仅 8 或 10，否
 # 11 VIO service（virtio_work：virtio_net_env_config）
 # -----------------------------------------------------------------------------
 # 层顺序 vio → vio.hH → vio.hH.pfP[.vfV].i0，后层覆盖前层（显式 0 也算），实例号固定 i0。
-# 两个参考顶层（virtio 的 project_env、rdma 的 dpu_top_env）都用外部配置模式，缺省 REAL_DUT、vio.pairs=0。
+# 两个参考顶层（virtio 的 vio_top_env、rdma 的 dpu_top_env）都用外部配置模式，缺省 REAL_DUT、vio.pairs=0。
 # Tcl load_params 重载时不能改：各 service 的 enabled、pairs、queue_type（含 pN/qN 逐队列格式）、features，以及 exec_mode、
 # iova_*、iommu_strict、scb、coverage、dpu.mem_*；其余 service 键（方向开关、queue_size、notify、completion 等）可在重载时修改。
 vio.enabled: 1                                     # 是否创建 VIO service；最终还要求 tx_enable 或 rx_enable 为 1 且 pairs≠0
@@ -467,7 +467,7 @@ vio_tx.count: 1                                    # Tcl：vio_tx count=100；�
 vio_rx_refill.qid: 0                               # 示例；Tcl：vio_rx_refill qid=0 count=64；未写时取 vio.rx.qid
 vio_rx_refill.count: 1                             # Tcl：count=64；未写时取 vio.rx.count，再缺省 1
 
-# 普通标准驱动（自测，examples/aip/virtio_aip_commands.sv）另注册 vio_init、vio_set_mq、vio_set_rss、vio_reset，
+# 普通标准驱动（自测，virtio_net_vip/src/seq/virtio_aip_commands.sv）另注册 vio_init、vio_set_mq、vio_set_rss、vio_reset，
 # 以及独立发包流 vio_tx0/vio_tx1（参数路径 vio.tx0.*/vio.tx1.*）；它们与项目命令不能编进同一个工程，外部配置模式拒绝执行。
 vio.mq.target: h0.pf0.i0                           # 示例；vio_set_mq 的目标（仅标准驱动）
 vio.mq.pairs: 1                                    # vio_set_mq 的活动队列对数（仅标准驱动）
@@ -709,7 +709,7 @@ rdma.traffic.imm: ""                               # SEND_IMM/WRITE_IMM 立即�
 #   {[1:256]:/30,[257:4096]:/70} 或 {64:=1,128:=3}（权重）、inc:64:512:64（等差候选）；rand 为 64 位全宽，几乎必越界，勿用。
 #   含 {}[]:, 的命令行值整体加引号：'+rdma.traffic.len={[1:256]:/30,[257:4096]:/70}'；count/w_*/op 等普通键读取时只抽一次。
 
-# RDMA Tcl 命令（rdma.enabled=1 时注册；sequence 在 src/tb/rdma_runtime_seq.sv，sequencer 以 aip_sqr_registry 名 rdma 登记）
+# RDMA Tcl 命令（rdma.enabled=1 时注册；sequence 在 src/tb/dpu/rdma_runtime_seq.sv，sequencer 以 aip_sqr_registry 名 rdma 登记）
 # 顺序：[set_param → load_params] → dut_config → rdma_init → rdma_run…。rdma_init 无参数，须在成功的 dut_config 之后，每个复位
 #   epoch 只能尝试一次（失败或被 kill 都不能重试），运行期间其他 rdma_* 命令被拒；尝试过后 load_params、dut_config 均被拒。
 # 结果为 "OK: <命令>: <摘要>" 或 "ERROR: <命令>: <原因>"（带 status，Tcl aip_check_status 可判断），未知参数报错并列出允许的键。
@@ -959,7 +959,7 @@ VIRTIO_COMPLETION_MODE: MSIX                       # MSIX 或 POLLING（也认�
 # -----------------------------------------------------------------------------
 # 21 常用流程
 # -----------------------------------------------------------------------------
-# VIO（virtio_work 参考顶层 project_env）：project_base_test 读参后先执行 vio_dpu_cfg_seq 配置 DUT 表，再进入 Tcl。
+# VIO（virtio_work 参考顶层 vio_top_env）：vio_top_base_test 读参后先执行 vio_dpu_cfg_seq 配置 DUT 表，再进入 Tcl。
 #   业务：vio_start → vio_tx / vio_rx_refill → vio_stop（只停 worker，可再 vio_start）；vio_release 停止并回收全部 VIO 队列。
 #   重载：vio_release → set_param … → load_params → 重新配置 DUT；virtio 参考顶层没有注册 dut_config，需集成方自行注册。
 # 组合顶层（rdma_work dpu_top_env）：Tcl dut_config 配置 DUT（VIO 与 RDMA 共用一个配置 sequence），然后执行各业务命令。
