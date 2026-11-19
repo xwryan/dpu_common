@@ -1,6 +1,7 @@
 // dpu_env_cfg 的 MSI-X 聚焦测试：真实 resolver、BAR map 与 publish；不分配 ring、不访问 DUT。
 // 向量租约接在 resolver 记录的向量块和已登记消息之后，依次接续，越界的租约不占用向量；publish 前后都可租。
 // 同一 Host 上拥有消息的 Function 共用 pfvf 时 publish 拒绝；给出各自 pfvf 后线性目录按 Host/pfvf/local 排序。
+// 租过向量的 Function 即使只有轮询 service 也进入 MSI-X 编程范围。
 module dpu_msix_cfg_test;
 	import uvm_pkg::*;
 	import dpu_resource_pkg::*;
@@ -45,8 +46,20 @@ module dpu_msix_cfg_test;
 		return '{host_id: host, pf_id: pf_id, kind: DPU_FUNCTION_PF, vf_id: 0};
 	endfunction
 
-	// 两个 Host、各两个 PF，每个 PF 一个启用 MSI-X 的 VIO service（qpair 数各不相同），PF1 的路由由参数给出。
-	// 消息模板按 Function 取不同 data 基址，同一 Host 的消息互不混淆；authored=1 时另登记一条块外的显式消息。
+	// 显式消息：同一地址，data 各不相同，同一 Host 的消息不混淆。
+	function automatic dpu_msix_message_t make_message(
+		input dpu_function_key_t	owner,
+		input int unsigned			local_vector,
+		input int unsigned			global_vector,
+		input bit [31:0]			data,
+		input bit					masked = 0
+	);
+		return '{owner: owner, local_vector: local_vector, global_vector: global_vector, address: 64'h1_0000_1000,
+			data: data, masked: masked};
+	endfunction
+
+	// 两个 Host、各两个 PF，每个 PF 一个 VIO service（qpair 数各不相同；msix_services=0 时都走轮询），PF1 的路由由
+	// 参数给出。消息模板按 Function 取不同 data 基址，同一 Host 的消息互不混淆；authored=1 时另登记一条块外的显式消息。
 	// publish_now=1 时返回 publish 的结果，否则只解析、冻结快照与 BAR map。
 	function automatic bit fixture(
 		input bit					authored,
@@ -55,12 +68,12 @@ module dpu_msix_cfg_test;
 		output dpu_device_snapshot	device,
 		output dpu_resource_snapshot	resources,
 		output dpu_bar_map			map,
-		output string				why
+		output string				why,
+		input bit					msix_services = 1
 	);
 		msix_test_cfg				test_cfg;
 		dpu_configuration_resolver	resolver;
 		dpu_placement_diagnostic	diagnostic;
-		dpu_msix_message_t			message;
 
 		test_cfg              = new("msix_cfg");
 		cfg                   = test_cfg;
@@ -76,15 +89,11 @@ module dpu_msix_cfg_test;
 			service.enabled     = 1;
 			service.tx_enable   = 1;
 			service.rx_enable   = 1;
-			service.msix_enable = 1;
+			service.msix_enable = msix_services;
 			service.qpairs      = 1 + f;
 			cfg.add_vio_service(service);
 		end
-		if (authored) begin
-			message = '{owner: pf(1, 0), local_vector: 40, global_vector: 100, address: 64'h1_0000_1000,
-				data: 32'habc, masked: 0};
-			cfg.messages.push_back(message);
-		end
+		if (authored) cfg.messages.push_back(make_message(pf(1, 0), 40, 100, 'habc));
 		resolver = new("resolver");
 		check(resolver.resolve(cfg.device_cfg, cfg.placement_cfg, device, resources, diagnostic),
 			{"resolve: ", diagnostic.message});
@@ -212,6 +221,47 @@ module dpu_msix_cfg_test;
 			{key, "=", value, " was not rejected with: ", expected});
 	endfunction
 
+	// 服务都走轮询，也没有 control_irq：只有租过向量的 Function 进入 MSI-X 编程范围，它的冻结消息（含 masked 的那条）
+	// 都有 linear 行，TABLE 行带 mask。租约在 publish 之前取，与平台在 env build 里租向量相同。
+	function automatic void check_lease_scope();
+		dpu_env_cfg				cfg;
+		dpu_device_snapshot		device;
+		dpu_resource_snapshot	resources;
+		dpu_bar_map				map;
+		dpu_cfg_scope			scope;
+		dpu_table_item_t		rows[$];
+		int unsigned			global_base;
+		int unsigned			local_base;
+		bit						linear[int unsigned];
+		bit						masked_row;
+		string					why;
+
+		check(fixture(0, 0, cfg, device, resources, map, why, 0), why);
+		check(cfg.lease_msix_vectors(device, resources, pf(1, 1), 2, global_base, local_base, why), why);
+		cfg.messages.push_back(make_message(pf(1, 1), local_base, global_base, 'h5000));
+		cfg.messages.push_back(make_message(pf(1, 1), local_base + 1, global_base + 1, 'h5001, 1));
+		check(cfg.publish(device, resources, map, why), {"publish with leased messages: ", why});
+		check(cfg.select_msix_scope(scope, why) && scope != null, {"leased Function did not join the MSI-X scope: ", why});
+		foreach (cfg.msix_linear_records[i]) begin
+			dpu_msix_linear_entry_t	entry;
+
+			entry = dpu_msix_linear_entry_t'(cfg.msix_linear_records[i].entry);
+			check(dpu_same_function_key(cfg.msix_linear_records[i].owner, pf(1, 1)),
+				"a polling Function without a lease joined the MSI-X scope");
+			linear[entry.global_msix_idx] = 1;
+		end
+		check(linear.exists(global_base) && linear.exists(global_base + 1), "leased vectors have no linear rows");
+		check(cfg.public_records(DPU_TABLE_MSIX_TABLE, scope, rows, why), why);
+		masked_row = 0;
+		foreach (rows[r]) begin
+			dpu_msix_table_entry_t	entry;
+
+			entry = dpu_msix_table_entry_t'(rows[r].entry);
+			if (entry.msix_data == 'h5001) masked_row = entry.msix_mask === 1'b1;
+		end
+		check(masked_row, "masked leased message lost its mask in the MSI-X table row");
+	endfunction
+
 	initial begin
 		string			fields[$] = '{"requester", "intel_pf", "intel_vf", "vport"};
 		string			values[$] = '{"1", "1", "-1", "1"};
@@ -254,6 +304,7 @@ module dpu_msix_cfg_test;
 			cfg.frozen_functions[dpu_function_key_name(pf(1, 0))].pfvf == 1, "pfvf/first_vf_offset parameters not stored");
 		check_lease(cfg, device, resources, 0);
 		check_linear(cfg, pfvf);
+		check_lease_scope();
 		// 平台在 publish 之前（env build）租向量，publish 后同一份快照上的租约接着排；另一份快照的租约被拒绝。
 		check(fixture(1, 0, early, device, resources, map, why), why);
 		check_lease(early, device, resources, 1);

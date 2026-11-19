@@ -61,6 +61,9 @@ class dpu_env_cfg extends uvm_object;
 	protected dpu_resource_snapshot	msix_lease_resources;
 	protected int unsigned			msix_lease_global;
 	protected int unsigned			msix_lease_local[string];
+	// 实际租到向量的 Function（不是起点表 msix_lease_local 里的每个向量块/消息 owner）：select_msix_scope 把其中
+	// 拥有冻结消息的加入编程范围。
+	protected bit					msix_lease_owners[string];
 
 	dpu_table_layout_t		frozen_layouts[dpu_table_kind_e];
 	dpu_function_policy_t	frozen_functions[string];
@@ -185,7 +188,8 @@ class dpu_env_cfg extends uvm_object;
 	extern protected function bit materialize_qsch_controls(output string	why);
 
 	// 按最终 service 完成模式选择 Function：轮询且未要求公共配置时保持空范围；MSI-X pair 须有对应未屏蔽消息，
-	// 公共模式另保留显式消息的 AF/其他 Function。须在 env connect 发布资源后、任何 DUT 写入前调用。
+	// 公共模式另保留显式消息的 AF/其他 Function。租过向量（lease_msix_vectors）的 Function 只要有冻结消息也进入范围，
+	// 这些消息按冻结值写（含 masked），与该服务自己的配置流程一致。须在 env connect 发布资源后、任何 DUT 写入前调用。
 	extern function bit select_msix_scope(
 		output dpu_cfg_scope	scope,
 		output string			why
@@ -1838,6 +1842,15 @@ function bit dpu_env_cfg::select_msix_scope(
 			end
 		end
 	end
+	// 租过向量的 Function（如 RDMA EQ）：组合流程里它可能既没有 MSI-X VIO service 也没有 control_irq。
+	foreach (frozen_messages[m]) begin
+		string	name;
+
+		name = dpu_function_key_name(frozen_messages[m].owner);
+		if (!msix_lease_owners.exists(name) || seen.exists(name)) continue;
+		seen[name] = 1;
+		keys.push_back(frozen_messages[m].owner);
+	end
 	if (configure_public) begin
 		foreach (frozen_messages[m]) begin
 			string	name;
@@ -3140,6 +3153,11 @@ function bit dpu_env_cfg::make_runtime_candidate(
 	candidate.platform_controls       = platform_controls;
 	candidate.frozen_functions        = frozen_functions;
 	candidate.frozen_bar_groups       = frozen_bar_groups;
+	// 租约状态随候选走，候选上的 select_msix_scope 与发布后的选择一致。
+	candidate.msix_lease_resources    = msix_lease_resources;
+	candidate.msix_lease_global       = msix_lease_global;
+	candidate.msix_lease_local        = msix_lease_local;
+	candidate.msix_lease_owners       = msix_lease_owners;
 
 	begin
 		string	reg_target;
@@ -3311,8 +3329,9 @@ function bit dpu_env_cfg::lease_msix_vectors(
 		local_base  = 0;
 		return 0;
 	end
-	msix_lease_global      = global_base + count;
-	msix_lease_local[name] = local_base + count;
+	msix_lease_global       = global_base + count;
+	msix_lease_local[name]  = local_base + count;
+	msix_lease_owners[name] = 1;
 	why                    = "";
 	return 1;
 endfunction
