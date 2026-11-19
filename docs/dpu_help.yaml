@@ -10,8 +10,8 @@
 # vio_tx.count、rdma_run.f0）只是 Tcl 命令参数的记法，在命令行上写成 vio_tx count=100。
 #
 # 对应代码：VPS ~/Documents 的本地提交（2026-11-19），* 表示该提交尚未推送到 GitHub。
-#   aip_core 8a56f4f*      dpu_common 0340e68    host_mem 830713f     pcie_work b0c0c33      inter_pcie 46a30a6
-#   net_packet fb8e2aa*    virtio_work 69b61f4*  rdma_work 5a800a0*   eth_seg_agent d792ca2* dpu_queue_work 5bd3211*
+#   aip_core 8a56f4f*      dpu_common 0340e68    host_mem 830713f     pcie_work adb22be*     inter_pcie 46a30a6
+#   net_packet fb8e2aa*    virtio_work 69b61f4*  rdma_work b1a19b1*   eth_seg_agent d792ca2* dpu_queue_work cc1c2c2*
 #   flow_control 877eefc
 # host_mem 由第 9 节的 dpu.mem_* 配置，自身不读参数；flow_control 不读参数；simflow 是运行流程工具，不在本文范围。
 #
@@ -326,7 +326,7 @@ BYPASS_CONFIG: 0                                   # 须写 +BYPASS_CONFIG=1（�
 CFG_VENDOR_ID: 1AF4                                # 十六进制数字（%h，建议不带 0x），取低 16 位；bypass 配置空间 Vendor ID
 CFG_DEVICE_ID: 1041                                # 十六进制数字（%h），取低 16 位；bypass 配置空间 Device ID
 CFG_BAR0_SIZE: 65536                               # 十进制字节数，须 2^N（代码不检查）；bypass 时 BAR0 sizing 掩码
-CFG_MSIX_VECTORS: 4                                # 十进制；只读入并打印，MSI-X 能力固定 4 项，当前无实际效果
+CFG_MSIX_VECTORS: 4                                # 十进制；bypass 配置空间 MSI-X 能力的 Table Size，1..256（表在 BAR0 0x5000，PBA 在 0x6000）
 TAG_BIT: 8                                         # 示例；仅 8 或 10，否则 fatal；10 → extended_tag_enable=1、max_outstanding=1024，8 → 0、256
 # TAG_BIT 由 pcie_tl_env build_phase 读取，覆盖 pcie.* 已读入的 extended_tag_enable/max_outstanding（SR-IOV 时同步
 # 10-bit Tag 能力位）；不给则沿用 pcie.*（代码默认 10-bit、1024）。pcie_work/sim/run.sh 默认传 +TAG_BIT=8。
@@ -577,7 +577,7 @@ vio.tx.hdr.inner_udp.auto_csum: 0                  # 示例；隧道中只影响
 # -----------------------------------------------------------------------------
 # 开关、运行模式与读取时机
 # 读取时机：build 读取（独立模型的 src_addr.* 在 rdma_init 读，rxe_reply_ms 在 rxe 启动时读）；Tcl load_params 只在
-#   rdma_init 之前可用（之后连同 VIO 整个事务被拒），重读 env/wait/qp/mem/pkt/traffic，提交后须重新 dut_config；
+#   rdma_init 之前可用（之后连同 VIO 整个事务被拒），重读 env/wait/msix/qp/mem/pkt/traffic，提交后须重新 dut_config；
 #   rdma_run 不重读参数（新建 QP 取当时的场景值）；traffic 表达式与 op(mix)/dir/signaled_pct 每条 WR 抽样。
 rdma.enabled: 0                                    # 组合顶层 RDMA 总开关；预先给出 rdma_cfg.functions/grants 时自动开启；只在 build 读一次
 rdma.env.mode: DUT                                 # PEER/RXE/DUT（不分大小写）；独立模型缺省 PEER，DPU 项目缺省 DUT；build 后不可改
@@ -608,7 +608,7 @@ rdma.src_addr.alloc: random                        # 源地址表（全部 Funct
 rdma.h0.pf0.src_addr.idx: 1023                     # 示例：钉住该 Function 的首项，0..1023，冲突报错；写在全局层会让多个 Function 冲突
 # RDMA 相关的 dpu.qsch.rdma_vfs/dbq_pages/vports 与 dpu.*.msix 模板见第 5、6 节。
 
-# EQ MSI-X（只在 build 读取；load_params 会重读但不提交）
+# EQ MSI-X（build 读取；load_params 重读并提交，在 rdma_init 登记 EQ 接收时生效）
 rdma.msix: 0                                       # 1=rdma_init 为 CEQ/AEQ 登记 MSI-X 接收，并核对每个已消费的 EQE 都有中断
 rdma.msix_per_msg: 1                               # 1=每个 EQE 一个中断；DUT 合并中断时设 0（每批一个）
 rdma.msix_grace_ns: 2000                           # 中断晚到上限（ns）
@@ -668,9 +668,9 @@ rdma.traffic.w_faa: 1                              # mix 权重
 rdma.traffic.signaled_pct: 100                     # signaled 比例，0..100；TX-only 全部 signaled
 rdma.traffic.dir: 2                                # 0=f0 发起，1=f1 发起，2=逐条随机；TX-only 固定 f0
 # 下面六项保留原文、每条 WR 求值；数值采样超出范围直接 UVM_FATAL（不裁剪、不重抽）。
-rdma.traffic.len: "[1:4096]"                       # 字节，上限 slot_bytes；UD 为 min(mtu,slot_bytes-40)，TX/RX-only 另限 mtu（这两类用缺省值会越界）；原子固定 8
+rdma.traffic.len: auto                             # 字节；auto 取 [1:本模式上限]：slot_bytes，UD 为 min(mtu,slot_bytes-40)，TX-only 为 min(mtu,slot_bytes)，RX-only 为 min(mtu,slot_bytes，UD 再减 40)；显式表达式越界即 fatal；原子固定 8
 rdma.traffic.sge: 1                                # SGE 数，1..min(max_sge,len)；原子与 rxe 远端发起时固定 1
-rdma.traffic.data_mode: RANDOM,FIXED,INCREMENT,PATTERN # 逐条等概率选一（无权重）；RX-only 不能选到 RANDOM
+rdma.traffic.data_mode: auto                       # auto 逐条从 RANDOM/FIXED/INCREMENT/PATTERN 等概率选，RX-only 不选 RANDOM；显式列表（无权重）中 RX-only 抽到 RANDOM 即报错
 rdma.traffic.data_fixed: 0                         # FIXED 时的负载字节，0..255
 rdma.traffic.data_pattern: "{0}"                   # PATTERN 的字节序列 {e0,e1,...}，每项 0..255，每项可写表达式
 rdma.traffic.imm: ""                               # SEND_IMM/WRITE_IMM 立即数，0..0xffffffff；空=每条随机
@@ -678,21 +678,26 @@ rdma.traffic.imm: ""                               # SEND_IMM/WRITE_IMM 立即�
 #   {[1:256]:/30,[257:4096]:/70} 或 {64:=1,128:=3}（权重）、inc:64:512:64（等差候选）；rand 为 64 位全宽，几乎必越界，勿用。
 #   含 {}[]:, 的命令行值整体加引号：'+rdma.traffic.len={[1:256]:/30,[257:4096]:/70}'；count/w_*/op 等普通键读取时只抽一次。
 
-# RDMA Tcl 命令（rdma.enabled=1 时注册；rdma_aip_cmd.sv 即将改写，以下为当前参数）
-# 顺序：[set_param → load_params] → dut_config → rdma_init → rdma_run…；rdma_init 无参数，须在成功的 dut_config 之后，
-#   每个 epoch 只能尝试一次（失败也不能重试），尝试后 load_params、dut_config 均被拒。rdma_stop 无参数，只取消运行中的
-#   rdma_run（空闲也成功），不销毁资源。各命令都可加 wait=0 后台执行（AIP 通用）。
-# <命令>.<参数> 只是记法，不是参数键；参数取无符号整数字面量（十进制或 0x），不支持随机语法。
-rdma_run.f0: 0                                     # 示例；发起端（TX-only 为发送端、RX-only 为接收端）global Function ID，0..255，必填（group 除外）
-rdma_run.f1: 1                                     # 示例；双端模式的对端 global ID，0..255 且 ≠f0；tx_only/rx_only 时不读
-rdma_run.qps: 1                                    # 本次新建 QP 对数，≥1；rx_only 须为 1
-rdma_run.tx_only: 0                                # 1=只建发送端并核对首发完整帧；只支持 RC/UD 的 send/send_imm（违例为 UVM_FATAL）
-rdma_run.rx_only: 0                                # 1=只建接收端、预投 count 个 RECV，返回发包字段，再 rdma_rx_wait；与 tx_only 互斥
-rdma_run.dest_qpn: 0x12345                         # 示例；对端 QPN，缺省 rdma.qp.dest_qpn；tx/rx_only 须 1..0xffffff
-rdma_run.dest_qkey: 0x80010000                     # UD 对端 Q_Key，缺省 rdma.qp.qkey，≤0xffffffff
-rdma_run.dmac: 0x001122334455                      # 示例；对端 MAC（别名 dst_mac），缺省 rdma.pkt.dst_mac；tx/rx_only 须非 0
-rdma_run.group: 0                                  # 示例；取 SV 声明的 cfg.flow_groups[N] 的 f0/f1/qps，不能与其他参数同用
-rdma_rx_wait.timeout_us: 100                       # 等 rx_only 登记的入站报文全部完成，缺省 rdma.env.response_timeout_us，>0
+# RDMA Tcl 命令（rdma.enabled=1 时注册；sequence 在 src/tb/rdma_runtime_seq.sv，sequencer 以 aip_sqr_registry 名 rdma 登记）
+# 顺序：[set_param → load_params] → dut_config → rdma_init → rdma_run…。rdma_init 无参数，须在成功的 dut_config 之后，每个复位
+#   epoch 只能尝试一次（失败或被 kill 都不能重试），运行期间其他 rdma_* 命令被拒；尝试过后 load_params、dut_config 均被拒。
+# 结果为 "OK: <命令>: <摘要>" 或 "ERROR: <命令>: <原因>"（带 status，Tcl aip_check_status 可判断），未知参数报错并列出允许的键。
+# rdma_run、rdma_rx_wait 只接受 count=1（缺省），不接受 time=；wait=0 后台执行。RDMA 未开启时命令仍存在，返回 sequencer is null。
+# 每个键依次取：命令参数 > rdma.run.<键>（plusarg 或 set_param，每次启动重读）> 行内注明的缺省。只接受整数字面量（十进制或 0x），
+#   不支持随机语法，非法值返回 ERROR 而不 fatal；叶名回退同样生效（+qps= 也会命中 rdma.run.qps）。
+# 另起一条可并发的同类命令：aip_bind_seq cmd=<名> type=rdma_run_seq sqr=rdma path=rdma.run_x（rdma_rx_wait_seq 同理）。
+rdma.run.f0: 0                                     # 示例；发起端（TX-only 为发送端、RX-only 为接收端）global Function ID，0..255，必给（用 group 时除外）
+rdma.run.f1: 1                                     # 示例；双端模式的对端 global ID，0..255 且 ≠f0；tx_only/rx_only 时不读
+rdma.run.qps: 1                                    # 本次新建 QP 对数，≥1；rx_only 须为 1
+rdma.run.tx_only: 0                                # 1=只建发送端并核对首发完整帧；只支持 RC/UD 的 send/send_imm（违例为 UVM_FATAL）
+rdma.run.rx_only: 0                                # 1=只建接收端、预投 count 个 RECV，返回发包字段，再 rdma_rx_wait；与 tx_only 互斥
+rdma.run.dest_qpn: 0x12345                         # 示例；对端 QPN，缺省 rdma.qp.dest_qpn；tx/rx_only 须 1..0xffffff
+rdma.run.dest_qkey: 0x80010000                     # UD 对端 Q_Key，缺省 rdma.qp.qkey，≤0xffffffff
+rdma.run.dmac: 0x001122334455                      # 示例；对端 MAC（dst_mac 为别名），缺省 rdma.pkt.dst_mac；tx/rx_only 须非 0
+rdma.run.group: 0                                  # 示例；取 SV 声明的 cfg.flow_groups[N] 的 f0/f1/qps，与任何来源的其他键同用即报错
+rdma.rx_wait.timeout_us: 100                       # rdma_rx_wait 等 rx_only 登记的入站报文全部完成的上限，缺省 rdma.env.response_timeout_us，>0
+# rdma_stop [cmd=<名>]：不给时取消 rdma_run，给出时取消该名字的 rdma_run 类命令（如 aip_bind_seq 复制的）；空闲返回 OK，
+#   名字不存在或不是 rdma_run 类返回 ERROR。流量作为子 sequence 随命令一起取消，不销毁已建资源。
 
 # Soft-RoCE（rxe）与独立模型序列的原始 plusarg（+NAME=value，不经 aip_core，set_param 无效）
 RXE_PEER: /path/to/rxe_peer                        # 示例；rxe_peer 进程路径，必填
@@ -767,7 +772,7 @@ eth0.outer_udp.dst_port: 4791                      # 示例；其余 hdr 字段�
 # 19 DPU 控制队列（dpu_queue_work：cmdq / mbx / tlpq / msgq）
 # -----------------------------------------------------------------------------
 # 前缀即 <q>_cfg.prefix，四个 env 各读自己的前缀（无字面 dpuq.* 公共键）；参数只在 build 时读一次，运行期 set_param 不生效。
-# 请写全路径：裸叶名（+entries=、+msix=、+func=）会命中多个前缀；字符串键的逗号值按 AIP 规则随机取一个候选。
+# 请写全路径：裸叶名（+entries=、+msix=、+func=）会命中多个前缀；单值字符串键（如 func、ptr_src）的逗号值按 AIP 规则随机取一个候选。
 # 公共键每个前缀都有、缺省相同，下面以 cmdq 为例（mbx./tlpq./msgq. 的 enabled/num_ops/wait.* 同义）。
 cmdq.enabled: 1                                    # 集成顶层据此决定是否创建该 env；env 自身不检查
 cmdq.num_ops: 64                                   # <q>_run 未给 n= 时的操作数，自测 rand/reset 也用
@@ -820,7 +825,7 @@ tlpq.work_mode: -1                                 # 写 0x80090+4*host 工作�
 tlpq.check_desc_type: 0                            # 1=检查 RX 描述符 type 等于 TLP type[3:0]（语义待确认），模型自测缺省 1
 # MSGQ：主机侧消费者；7 类子队列控制结构在 AF BAR0 0x10040 起，每类 0x40。
 msgq.func: h0.pf0                                  # 写 HID/FID、收门铃的消费 Function，须在拓扑内；msix=1 时须为 AF
-msgq.types: tstamp,age                             # 启用子队列 fse/age/tstamp/notify/iacl/eacl/vdpa（小写不重复）；命令行逗号值只随机取一个
+msgq.types: tstamp,age                             # 启用的子队列列表 fse/age/tstamp/notify/iacl/eacl/vdpa（小写不重复），如 +msgq.types=fse,age,tstamp
 msgq.ptr_src: mem                                  # 写指针来源：mem=硬件写回的 seq_id，reg=读 curr_ptr 寄存器
 msgq.credit: update                                # update=消费后回写 tail，init=同驱动只在配置时写 tail=entries-1
 msgq.check_credit: 1                               # 硬件写入 tail 保留的那一项即报错；覆盖模式 DUT 配 credit=init 时置 0
