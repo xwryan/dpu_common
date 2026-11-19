@@ -11,7 +11,7 @@
 #
 # 对应代码：VPS ~/Documents 的本地提交（2026-11-19），* 表示该提交尚未推送到 GitHub。
 #   aip_core 2ca7420*      dpu_common 0340e68    host_mem 830713f     pcie_work adb22be*     inter_pcie 46a30a6
-#   net_packet 41d60e1*    virtio_work 018e6c8*  rdma_work 5f35ae8*   eth_seg_agent 1da2ba7* dpu_queue_work cc1c2c2*
+#   net_packet 41d60e1*    virtio_work 3abdb2d*  rdma_work d7d953c*   eth_seg_agent 1da2ba7* dpu_queue_work cc1c2c2*
 #   flow_control 877eefc
 # host_mem 由第 9 节的 dpu.mem_* 配置，自身不读参数；flow_control 不读参数；simflow 是运行流程工具，不在本文范围。
 #
@@ -680,9 +680,9 @@ rdma.pkt.src_mac: 0x020000000001                   # 示例，缺省 0；DPU 必
 rdma.pkt.src_ip: 10.0.0.1                          # 示例，缺省 0；DPU 必填：DUT 自己的 IPv4
 rdma.pkt.dst_mac: 0                                # 双端时非 0 即作 RTR DMAC（0 用对端 env MAC）；rdma_run dmac 缺省
 rdma.pkt.dst_ip: 0                                 # 对端 IPv4；DPU 写入 QPC 目的 GID（::ffff:a.b.c.d）
-rdma.pkt.vlan_en: 0                                # VLAN 开关
-rdma.pkt.vlan_id: 0                                # VLAN ID，0..4095
-rdma.pkt.udp_sport: 0                              # UDP 源端口，0..65535
+rdma.pkt.vlan_en: 0                                # VLAN 开关；DPU 在 RTR 时写入 QPC
+rdma.pkt.vlan_id: 0                                # VLAN ID，0..4095；DPU 在 RTR 时写入 QPC
+rdma.pkt.udp_sport: 0                              # UDP 源端口，0..65535；DPU 在 RTR 时写入 QPC
 
 # RDMA 场景：流量
 rdma.traffic.op: send                              # send/send_imm/write/write_imm/read/cas/faa，或 mix（按 w_* 逐条抽）
@@ -748,11 +748,32 @@ RDMA_RANDOM_COUNT: 200                             # 独立模型 rdma_random_vs
 # 17 组合顶层（rdma_work integration/project 的 dpu_top_env）
 # -----------------------------------------------------------------------------
 top.ready_timeout_ns: 100000                       # 等全部 R-Tile 端口出复位的上限（ns）
-top.timeout_ns: 10000000                           # 整体仿真时间上限（ns，uvm_root::set_timeout）
+top.timeout_ns: 10000000                           # 整体仿真时间上限（ns）；base test 在 build 中 set_timeout(…,1)，会盖过 +UVM_TIMEOUT=<t>，只有 +UVM_TIMEOUT=<t>,NO 才优先
 top.cmd_watchdog_ns: 50000                         # 单条 Tcl 命令连续无活动的停滞上限（ns），0 关闭；真实 DUT 上的 rdma_init 需调大
 AIP_TCL: 1                                         # 原始开关，只看是否出现：+AIP_TCL 进入 Tcl bridge（脚本经 -ucli -do），否则缺省只做 dut_config
-# Tcl：dut_config（VIO+RDMA 共用的 DPU 配置）、load_params（DPU/VIO/RDMA 参数原子重载，不写 DUT）、vio_release，均无参数。
+# Tcl：dut_config（VIO+RDMA 共用的 DPU 配置）、load_params（DPU/VIO/RDMA 参数原子重载，不写 DUT）、vio_release，都是 seq 命令，
+# 在管理 RC 上运行（aip_sqr_registry 名 dpu）。均无参数，未知键、count≠1、time= 都返回 ERROR；成功返回 "OK: <命令>"，失败返回
+# "ERROR: <命令>: 原因"。dut_config 运行中再发返回 BUSY。rdma_init 尝试过（或正在运行），或任一 Host 仍有未回收的 VIO（须先
+# vio_release）时，dut_config 不碰 DUT、直接返回 ERROR；真正执行时的失败仍是 fatal。
 # 组合顶层缺省：RDMA 关闭（example test 改为开启）、vio.pairs=0、VIO 为 REAL_DUT 外部配置、RDMA mode=DUT、vseq=rdma_traffic_vseq。
+
+# 业务报文比对（示例参考：integration/project/compare/，不在项目 filelist 里；编译时加 compare/compare.f，还需 ETH_SEG_AGENT_ROOT）
+top.compare_type: dpu_top_cmp                      # 示例；factory 类型名，dpu_top_env 在 build 末尾创建子节点 compare；不给则不创建
+# dpu_top_cmp 登记各 Host VIO 的 VTX/VRX 采样点，并注册 aip end checker dpu_cmp。两条链：ETH RX → 参考模型 → 目标 Function 的 VRX；
+# VTX → 参考模型 → ETH TX。按内容键无序匹配、逐字节比较整帧，RoCEv2（UDP 4791）两向都排除。dpu_cmp.* 在 build 读取，
+# 各 Function 的 mac/vlan/port 在 end_of_elaboration 读取（路径 dpu_cmp.hH.pfP[.vfV].iN）。
+dpu_cmp.eth_agents: eth0                           # bind 进来的 eth agent 名列表（逗号分隔），下标即端口号；没 bind 的名字打一行 info 后跳过
+dpu_cmp.portid: 1                                  # 在各采样点上的订阅编号；同一采样点的其他消费者要用别的编号
+dpu_cmp.poll_ns: 10                                # 采样点空闲时的复查间隔（ns），>0
+dpu_cmp.sample_timeout_ns: 1000                    # 有积压时单次取样的超时上限（ns），>0
+dpu_cmp.rx_unknown: DPU_CMP_UNKNOWN_DROP           # RX 帧的 DMAC(+VLAN) 找不到 Function：DROP 只计数，REPORT 报 UVM_ERROR DPU_CMP_RX_UNKNOWN
+dpu_cmp.rx_csum: DPU_CMP_CSUM_IGNORE               # VRX 的 DATA_VALID 期望：IGNORE 不比较；VALID 为 L4 校验和正确的 TCP/UDP 帧置位、其余清零；NONE 始终清零；只适用于标准队列
+dpu_cmp.port: 0                                    # 各 Function 的缺省出口端口（eth_agents 下标）
+dpu_cmp.min_frame: 60                              # TX 期望的最短帧长（不含 FCS），不足补零
+dpu_cmp.fwd_direct: 2                              # Custom 包 fwd 字段中"按 dport_id 直达端口"的编码，0..3（缺省值待按 DUT 规格确认）；fwd=0 DROP、3 CPU 不出 ETH，其余走缺省端口
+dpu_cmp.h0.pf0.i0.mac: 0x020000000010              # 示例；该 Function 的 MAC，RX 帧按 DMAC 找 Function；无缺省
+dpu_cmp.h0.pf0.i0.vlan: 100                        # 示例；该 Function 收的 VLAN（12 位）；不给只收无 VLAN 帧
+dpu_cmp.h0.pf0.i0.port: 1                          # 示例；该 Function 的缺省出口端口，缺省取 dpu_cmp.port
 
 # -----------------------------------------------------------------------------
 # 18 ETH 分段 agent（eth_seg_agent）
@@ -933,7 +954,12 @@ VIRTIO_COMPLETION_MODE: MSIX                       # MSIX 或 POLLING（也认�
 #   业务：vio_start → vio_tx / vio_rx_refill → vio_stop（只停 worker，可再 vio_start）；vio_release 停止并回收全部 VIO 队列。
 #   重载：vio_release → set_param … → load_params → 重新配置 DUT；virtio 参考顶层没有注册 dut_config，需集成方自行注册。
 # 组合顶层（rdma_work dpu_top_env）：Tcl dut_config 配置 DUT（VIO 与 RDMA 共用一个配置 sequence），然后执行各业务命令。
-#   重载：vio_release → set_param … → load_params → dut_config → vio_start / rdma_init。开启 RDMA 时，rdma_init 尝试过
-#   之后（成功或失败）同一 epoch 内的 load_params、dut_config 都会被拒，所以重载只能放在 rdma_init 之前。
+#   重载：vio_release → set_param … → load_params → dut_config → vio_start / rdma_init。dut_config 发现任一 Host 仍有未回收的
+#   VIO 时直接返回 ERROR、不写 DUT，所以 vio_release 不能省。开启 RDMA 时，rdma_init 尝试过（或正在运行）之后，同一 epoch
+#   内的 load_params、dut_config 都会被拒，所以重载只能放在 rdma_init 之前。
+# RDMA RX-only（组合顶层）：设置 ::rdma_f0 ::rdma_dest_qpn ::rdma_dmac ::rdma_eth_agent（可选 ::rdma_eth_dmac/dip/sip）后 source
+#   integration/project/rdma_rx_start.tcl。它依次执行 load_params、dut_config、rdma_init、rdma_run rx_only=1，按返回字段用
+#   <agent>_net_send 逐包发 RoCEv2（PSN 递增），最后 rdma_rx_wait。负载模式先取 ::rdma_data_mode，再取 +rdma.traffic.data_mode，
+#   都没有时设为 FIXED,INCREMENT；只允许 FIXED/INCREMENT，其他值在发任何命令前报错。
 # 快照恢复：aip_restore → 重新 source AIP 加载脚本 → load_params → dut_config。恢复后参数宏改读本次 simv 的 plusarg，
 #   快照内的 set_param 覆盖仍优先；只在 build 时读取的参数（如 top.*、pcie.*）保持快照里的值。
