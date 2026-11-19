@@ -3356,6 +3356,11 @@ function bit dpu_env_cfg::publish(
 		why = "new device snapshot requires environment rebuild";
 		return 0;
 	end
+	// 已发出的租约只对它们所在的资源快照成立。
+	if (msix_lease_resources != null && msix_lease_resources != resources) begin
+		why = "MSI-X vectors were leased on another resource snapshot";
+		return 0;
+	end
 	// 复用现有 cfg 查询和消息生成，不提前改写 this；临时 cfg 不采样参数或分配资源。
 	candidate                      = new("publication_candidate");
 	candidate.device_snapshot      = device;

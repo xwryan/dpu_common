@@ -1,7 +1,7 @@
 // dpu_env_cfg 的 MSI-X 聚焦测试：真实 resolver、BAR map 与 publish；不分配 ring、不访问 DUT。
 // 向量租约接在 resolver 记录的向量块和已登记消息之后，依次接续，越界的租约不占用向量；publish 前后都可租。
 // 同一 Host 上拥有消息的 Function 共用 pfvf 时 publish 拒绝；给出各自 pfvf 后线性目录按 Host/pfvf/local 排序。
-// 租过向量的 Function 即使只有轮询 service 也进入 MSI-X 编程范围。
+// 租过向量的 Function 即使只有轮询 service 也进入 MSI-X 编程范围；租约所在的资源快照之外的快照不能发布。
 module dpu_msix_cfg_test;
 	import uvm_pkg::*;
 	import dpu_resource_pkg::*;
@@ -262,6 +262,40 @@ module dpu_msix_cfg_test;
 		check(masked_row, "masked leased message lost its mask in the MSI-X table row");
 	endfunction
 
+	// 同一 device 快照、同一份规划解析两份资源快照：在第一份上租向量后，发布第二份必须被拒绝，发布第一份照常。
+	function automatic void check_lease_snapshot();
+		dpu_env_cfg						cfg;
+		dpu_device_snapshot				device;
+		dpu_resource_snapshot			resources;
+		dpu_resource_snapshot			other;
+		dpu_bar_map						map;
+		dpu_placement_normalizer		normalizer;
+		dpu_device_resolver				device_resolver;
+		dpu_resource_resolver			resource_resolver;
+		dpu_device_cfg					normalized;
+		dpu_normalized_placement_plan	plan;
+		dpu_placement_diagnostic		diagnostic;
+		int unsigned					global_base;
+		int unsigned					local_base;
+		string							why;
+
+		check(fixture(0, 0, cfg, device, resources, map, why), why);
+		normalizer        = new("normalizer");
+		device_resolver   = new("device_resolver");
+		resource_resolver = new("resource_resolver");
+		check(normalizer.normalize(cfg.device_cfg, cfg.placement_cfg, normalized, plan, diagnostic) &&
+			device_resolver.resolve(normalized, device, why), {"resolve: ", why});
+		check(resource_resolver.resolve(device, plan, resources, diagnostic) &&
+			resource_resolver.resolve(device, plan, other, diagnostic) && resources != other,
+			{"resource resolve: ", diagnostic.message});
+		map = new("map");
+		check(map.initialize(device, 1, why) && map.freeze(why), {"BAR map: ", why});
+		check(cfg.lease_msix_vectors(device, resources, pf(0, 1), 2, global_base, local_base, why), why);
+		check(!cfg.publish(device, other, map, why) && why == "MSI-X vectors were leased on another resource snapshot",
+			{"publish of a resource snapshot other than the leased one: ", why});
+		check(cfg.publish(device, resources, map, why), {"publish of the leased resource snapshot: ", why});
+	endfunction
+
 	initial begin
 		string			fields[$] = '{"requester", "intel_pf", "intel_vf", "vport"};
 		string			values[$] = '{"1", "1", "-1", "1"};
@@ -305,6 +339,7 @@ module dpu_msix_cfg_test;
 		check_lease(cfg, device, resources, 0);
 		check_linear(cfg, pfvf);
 		check_lease_scope();
+		check_lease_snapshot();
 		// 平台在 publish 之前（env build）租向量，publish 后同一份快照上的租约接着排；另一份快照的租约被拒绝。
 		check(fixture(1, 0, early, device, resources, map, why), why);
 		check_lease(early, device, resources, 1);
