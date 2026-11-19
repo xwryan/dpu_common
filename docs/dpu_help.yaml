@@ -10,8 +10,8 @@
 # vio_tx.count、vio_rx_refill.qid）只是 Tcl 命令参数的记法，在命令行上写成 vio_tx count=100。
 #
 # 对应代码：VPS ~/Documents 的本地提交（2026-11-19），* 表示该提交尚未推送到 GitHub。
-#   aip_core 2ca7420*      dpu_common 0340e68    host_mem 830713f     pcie_work adb22be*     inter_pcie 46a30a6
-#   net_packet 41d60e1*    virtio_work 3abdb2d*  rdma_work d7d953c*   eth_seg_agent 1da2ba7* dpu_queue_work cc1c2c2*
+#   aip_core 02f421e       dpu_common 0340e68    host_mem 830713f     pcie_work adb22be*     inter_pcie 46a30a6
+#   net_packet da057fa     virtio_work 3abdb2d   rdma_work 446ca67    eth_seg_agent 1da2ba7  dpu_queue_work cc1c2c2
 #   flow_control 877eefc
 # host_mem 由第 9 节的 dpu.mem_* 配置，自身不读参数；flow_control 不读参数；simflow 是运行流程工具，不在本文范围。
 #
@@ -52,9 +52,11 @@
 # 优先级 [i] > 整体列表 > .each > 默认，越界索引忽略。解析错误一律打印 [FATAL]（用户文件行号、+参数名、原文）
 # 并 $fatal(1)，不回退默认值；回归请加 simv -exitstatus 以拿到非 0 退出码。
 # 日志：每次宏读取打印 [aip_cmdline] param '<leaf>' (scope='<path>') = 值（数组为 array、队列为 queue_summary），
-# 按完整键限次（超过上限照常抽样，只是不打印）；直接调用 get_single_value 不打印。下面两个开关在首次打印时读一次，
-# 之后的 set_param 和 aip_restore 后新给的 plusarg 都不生效，运行中只能用 Tcl set_cmdline_print enable=0|1 max_prints=N
-# （并清零计数）；set_param/clear_param 另打印 [SET_PARAM]/[CLEAR_PARAM]。
+# 按完整键限次（超过上限照常抽样，只是不打印）；直接调用 get_single_value 不打印。下面两个开关只认完整键（override 优先
+# 于 plusarg；不查别名和裸叶名，给其他组件的 +print_enable=、+max_prints= 不影响它们），首次打印时读取，之后的 set_param
+# 要到下一次 aip_restore 才读到；恢复后按本次 simv 的参数重读（未给出的取默认，快照内 override 仍优先）并清零计数。
+# 运行中用 Tcl set_cmdline_print enable=0|1 max_prints=N：立即生效并清零计数，有效到下一次 aip_restore，恢复后要沿用须
+# 再设一次。set_param/clear_param 另打印 [SET_PARAM]/[CLEAR_PARAM]。
 # 快照：aip_restore 后重新 source 加载脚本，参数宏改读本次 simv 的 plusargs；快照内 set_param 覆盖仍优先，已赋值变量不刷新。
 # 等待策略 <prefix>.wait.poll_ns/timeout_ns/multiplier/max_polls（aip_wait_policy，默认 10ns/10000ns/1/10000，须 1..2^32-1）
 # 由各 env 传前缀读取。AIP 命令参数为 key=value；wait=0|1 为框架保留键（默认 1），seq 命令另有 count=N（默认 1，
@@ -65,8 +67,8 @@
 # 新命令（path= 只对以 aip_seq_type_path 声明的类有效），aip_unbind_seq cmd= 解除，aip_sqr_list 列出已登记的 sequencer。
 # Tcl 变量（非 plusarg）：::aip_echo 1、::aip_ack_timeout_ns 52000、::aip_ckpt_dir ./aip_ckpt；
 # 命令看门狗用 Tcl set_cmd_watchdog ns=N 调（默认 50000，0 禁用）。
-aip_cmdline.print_enable: 1                        # 参数读取日志总开关，0 关闭（解析与报错照常）
-aip_cmdline.max_prints: 10                         # 每个完整键最多打印次数；-1 不限，0 不打印
+aip_cmdline.print_enable: 1                        # 参数读取日志总开关，0 关闭（解析与报错照常）；只认此完整键
+aip_cmdline.max_prints: 10                         # 每个完整键最多打印次数；-1 不限，0 不打印；只认此完整键
 SCB_REPORT_LIMIT: 10                               # 原生 plusarg；各 aip_scb 报告列出的问题 stream 数，-1 全部，0 只汇总，仅十进制
 
 # -----------------------------------------------------------------------------
@@ -762,6 +764,10 @@ top.compare_type: dpu_top_cmp                      # 示例；factory 类型名�
 # dpu_top_cmp 登记各 Host VIO 的 VTX/VRX 采样点，并注册 aip end checker dpu_cmp。两条链：ETH RX → 参考模型 → 目标 Function 的 VRX；
 # VTX → 参考模型 → ETH TX。按内容键无序匹配、逐字节比较整帧，RoCEv2（UDP 4791）两向都排除。dpu_cmp.* 在 build 读取，
 # 各 Function 的 mac/vlan/port 在 end_of_elaboration 读取（路径 dpu_cmp.hH.pfP[.vfV].iN）。
+# TX 出口：标准队列走 Function 的缺省端口；Custom 队列按描述符 fwd：DROP=0、CPU=3 不出 ETH，RSV=2 按 fwd_rsv 处理，
+# NORMAL=1 按 dport_type/dport_id 选口（eth_dport_type、dport_other）。RX 还比较接收队列：期望由参考模型
+# predict_rx_queue() 给出，缺省固定 0，与 VRX 样本的 local_qid（第 i 对的 RX 队列为 2i）比较；多对队列且 DUT 按 RSS
+# 等规则分流时，须派生 dpu_cmp_rm 覆写它，否则报 mismatch。
 dpu_cmp.eth_agents: eth0                           # bind 进来的 eth agent 名列表（逗号分隔），下标即端口号；没 bind 的名字打一行 info 后跳过
 dpu_cmp.portid: 1                                  # 在各采样点上的订阅编号；同一采样点的其他消费者要用别的编号
 dpu_cmp.poll_ns: 10                                # 采样点空闲时的复查间隔（ns），>0
@@ -770,7 +776,10 @@ dpu_cmp.rx_unknown: DPU_CMP_UNKNOWN_DROP           # RX 帧的 DMAC(+VLAN) 找�
 dpu_cmp.rx_csum: DPU_CMP_CSUM_IGNORE               # VRX 的 DATA_VALID 期望：IGNORE 不比较；VALID 为 L4 校验和正确的 TCP/UDP 帧置位、其余清零；NONE 始终清零；只适用于标准队列
 dpu_cmp.port: 0                                    # 各 Function 的缺省出口端口（eth_agents 下标）
 dpu_cmp.min_frame: 60                              # TX 期望的最短帧长（不含 FCS），不足补零
-dpu_cmp.fwd_direct: 2                              # Custom 包 fwd 字段中"按 dport_id 直达端口"的编码，0..3（缺省值待按 DUT 规格确认）；fwd=0 DROP、3 CPU 不出 ETH，其余走缺省端口
+dpu_cmp.eth_dport_type: -1                         # Custom 描述符 dport_type 中表示 ETH 端口的编码，-1..7（越界 fatal）；等于它时 dport_id 即端口下标；-1 未配置（待 DUT 确认），NORMAL 一律走缺省端口
+dpu_cmp.dport_other: DPU_CMP_DPORT_NOT_ETH         # eth_dport_type 已配置时，NORMAL 但 dport_type 不是 ETH 编码（如 Host）的包：NOT_ETH 不出 ETH，DPU_CMP_DPORT_DEFAULT_PORT 走缺省端口
+dpu_cmp.fwd_rsv: DPU_CMP_RSV_REPORT                # fwd=RSV(2) 的包：REPORT 报 UVM_ERROR DPU_CMP_FWD_RSV，DPU_CMP_RSV_COUNT 只计数；都不登记期望
+# 已删除：dpu_cmp.fwd_direct，不再读取（给了也不报错）；出口改按 fwd 的固定编码和上面三个参数判定。
 dpu_cmp.h0.pf0.i0.mac: 0x020000000010              # 示例；该 Function 的 MAC，RX 帧按 DMAC 找 Function；无缺省
 dpu_cmp.h0.pf0.i0.vlan: 100                        # 示例；该 Function 收的 VLAN（12 位）；不给只收无 VLAN 帧
 dpu_cmp.h0.pf0.i0.port: 1                          # 示例；该 Function 的缺省出口端口，缺省取 dpu_cmp.port
@@ -962,4 +971,5 @@ VIRTIO_COMPLETION_MODE: MSIX                       # MSIX 或 POLLING（也认�
 #   <agent>_net_send 逐包发 RoCEv2（PSN 递增），最后 rdma_rx_wait。负载模式先取 ::rdma_data_mode，再取 +rdma.traffic.data_mode，
 #   都没有时设为 FIXED,INCREMENT；只允许 FIXED/INCREMENT，其他值在发任何命令前报错。
 # 快照恢复：aip_restore → 重新 source AIP 加载脚本 → load_params → dut_config。恢复后参数宏改读本次 simv 的 plusarg，
-#   快照内的 set_param 覆盖仍优先；只在 build 时读取的参数（如 top.*、pcie.*）保持快照里的值。
+#   快照内的 set_param 覆盖仍优先；只在 build 时读取的参数（如 top.*、pcie.*）保持快照里的值。参数日志开关按本次参数
+#   重读，恢复前的 set_cmdline_print 不保留，需要时恢复后再设。
