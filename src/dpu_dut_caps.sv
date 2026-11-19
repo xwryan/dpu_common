@@ -86,8 +86,8 @@ class dpu_dut_caps extends uvm_object;
             bar_profiles.push_back(rhs.bar_profiles[index]);
     endfunction
 
-    // 两份能力逐字段相等：全部数值字段，BAR profile 按 kind/role 对应、与顺序无关（validate 保证 kind/role 唯一）。
-    // 不等时 why 给出第一个不同的字段。
+    // 两份能力逐字段相等：全部数值字段，BAR profile 按 kind/role 双向对应、与顺序无关（未经 validate 的重复 kind/role
+    // 不会因为单向查找而比较相等）。不等时 why 给出第一个不同的字段。
     function bit equals(input dpu_dut_caps rhs, output string why);
         string names[11] = '{"max_hosts", "max_pfs_per_host", "max_vfs_per_pf", "max_functions",
             "global_msix_vector_count", "mailbox_msix_vectors", "af_extra_msix_vectors",
@@ -130,6 +130,20 @@ class dpu_dut_caps extends uvm_object;
                 (other.alignment != bar_profiles[index].alignment)) begin
                 why = $sformatf("BAR profile for function kind %0d role %0d differs",
                                 bar_profiles[index].kind, bar_profiles[index].role);
+                return 0;
+            end
+        end
+        foreach (rhs.bar_profiles[index]) begin
+            dpu_bar_profile_t other;
+            string ignored;
+
+            if (!lookup_bar_profile(rhs.bar_profiles[index].kind, rhs.bar_profiles[index].role, other,
+                                    ignored) ||
+                (other.even_bar_id != rhs.bar_profiles[index].even_bar_id) ||
+                (other.size != rhs.bar_profiles[index].size) ||
+                (other.alignment != rhs.bar_profiles[index].alignment)) begin
+                why = $sformatf("BAR profile for function kind %0d role %0d differs",
+                                rhs.bar_profiles[index].kind, rhs.bar_profiles[index].role);
                 return 0;
             end
         end

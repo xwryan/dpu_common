@@ -826,6 +826,11 @@ class dpu_device_resolver_test extends uvm_test;
         void'(rhs.bar_profiles.pop_back());
         if (lhs.equals(rhs, why) || lhs.equals(null, why))
             `uvm_fatal("RESOLVER_TEST", "missing BAR profile or null capabilities compared equal")
+        // Unvalidated duplicate kind/role: [p0, p0, p2..] against [p0, p1, p2..] must not compare equal.
+        rhs.copy_from(lhs);
+        rhs.bar_profiles[1] = rhs.bar_profiles[0];
+        if (rhs.equals(lhs, why) || lhs.equals(rhs, why))
+            `uvm_fatal("RESOLVER_TEST", "duplicate kind/role BAR profile compared equal")
     endfunction
 
     // Catches a resolver change that accepts duplicate host identities.
