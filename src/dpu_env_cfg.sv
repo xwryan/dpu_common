@@ -3334,11 +3334,13 @@ function bit dpu_env_cfg::lease_msix_vectors(
 		dpu_msix_vector_block_t			blocks[$];
 		dpu_vio_qpair_binding_t			pairs[$];
 		dpu_af_extra_queue_binding_t	extras[$];
+		dpu_msix_control_binding_t		controls[$];
 
 		resources.list_msix_vector_blocks(blocks);
 		resources.list_vio_bindings(pairs);
 		resources.list_af_extra_queue_bindings(extras);
-		if (blocks.size() == 0 && (pairs.size() != 0 || extras.size() != 0)) begin
+		resources.list_msix_control_bindings(controls);
+		if (blocks.size() == 0 && (pairs.size() != 0 || extras.size() != 0 || controls.size() != 0)) begin
 			why = "resource snapshot has no MSI-X vector blocks; resolve it with dpu_resource_resolver";
 			return 0;
 		end
