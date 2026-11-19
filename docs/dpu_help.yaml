@@ -9,9 +9,9 @@
 # 全大写的键（如 TAG_BIT、AIP_TCL）是原生 plusarg，写成 +NAME=值，不支持 set_param；<命令>.<参数> 形式的键（如
 # vio_tx.count、vio_rx_refill.qid）只是 Tcl 命令参数的记法，在命令行上写成 vio_tx count=100。
 #
-# 对应代码：各仓库的以下提交（2026-11-19，均已推送到 GitHub）。
+# 对应代码：各仓库的以下提交（2026-11-19；带 * 的是尚未推送到 GitHub 的本地提交）。
 #   aip_core 02f421e       dpu_common 0340e68    host_mem 830713f     pcie_work adb22be      inter_pcie 46a30a6
-#   net_packet da057fa     virtio_work 3abdb2d   rdma_work aa08e9f    eth_seg_agent 1da2ba7  dpu_queue_work cc1c2c2
+#   net_packet da057fa     virtio_work 7b43e4f*  rdma_work 9ab1ca5*   eth_seg_agent 1da2ba7  dpu_queue_work cc1c2c2
 #   flow_control 877eefc
 # host_mem 由第 9 节的 dpu.mem_* 配置，自身不读参数；flow_control 不读参数；simflow 是运行流程工具，不在本文范围。
 #
@@ -384,7 +384,7 @@ vio.iova_base: 0x0000000080000000                  # 设备可见 IOVA 起点，
 vio.iova_size: 0xffffffff7ffff000                  # IOVA 空间大小，4KB 对齐、非零，base+size 不溢出
 vio.iova_policy: IOMMU_IOVA_RANDOM                 # IOMMU_IOVA_RANDOM / IOMMU_IOVA_FIRST_FIT
 vio.iommu_strict: 1                                # IOMMU 严格检查，0/1
-vio.scb: 1                                         # VIO scoreboard；当前只统计 monitor 事件并检查 DMA 访问，不比对报文
+vio.scb: 1                                         # VIO scoreboard；当前只计数 monitor 事件、对零长度 DMA 报错，中断只打印，不比对报文
 vio.coverage: 0                                    # 1 时创建 VIO coverage 组件，但各分组开关无人打开，实际不采样
 
 # -----------------------------------------------------------------------------
@@ -611,8 +611,8 @@ vio.tx.hdr.inner_udp.auto_csum: 0                  # 示例；隧道中只影响
 #   rdma_init 之前可用（之后连同 VIO 整个事务被拒），重读 env/wait/msix/qp/mem/pkt/traffic，提交后须重新 dut_config；
 #   rdma_run 不重读参数（新建 QP 取当时的场景值）；traffic 表达式与 op(mix)/dir/signaled_pct 每条 WR 抽样。
 rdma.enabled: 0                                    # 组合顶层 RDMA 总开关；预先给出 rdma_cfg.functions/grants 时自动开启；只在 build 读一次
-rdma.env.mode: DUT                                 # PEER/RXE/DUT（不分大小写）；独立模型缺省 PEER，DPU 项目缺省 DUT；build 后不可改
-rdma.env.link_type: rdma_link                      # 独立模型链路：rdma_link/rdma_link_netpkt/rdma_dut_link（需 dut_endpoint）；build 后不可改
+rdma.env.mode: DUT                                 # PEER/RXE/DUT（不分大小写）；独立模型缺省 PEER，DPU 项目缺省 DUT；DUT 只经外部 DPU 平台接入，独立模型给 DUT 即报错；build 后不可改
+rdma.env.link_type: rdma_link                      # 独立模型链路：rdma_link 或 rdma_link_netpkt（rxe 插件强制 rdma_link_rxe）；build 后不可改
 rdma.env.vseq: rdma_traffic_vseq                   # DPU 项目只影响 dut_config 的 EAT 项（srq/qp_lifecycle/errors/reliability/random_vseq）；独立模型由 test 给初值并按名创建；build 后不可改
 rdma.env.checker_enable: 1                         # 协议检查器；build 后不可改
 rdma.env.cov_enable: 1                             # 覆盖率收集；build 后不可改
@@ -651,7 +651,7 @@ rdma.wait.poll_ns: 10                              # CMQ 等待轮询间隔，1.
 rdma.wait.timeout_ns: 100000                       # CMQ 完成与 RTS→SQD 等待超时，1..2^32-1
 rdma.wait.multiplier: 1                            # 倍率：作用于 timeout_ns、ready_ns 与流量排空上限，1..2^32-1
 rdma.wait.max_polls: 1000000                       # 防挂死轮询上限；须 max_polls×poll_ns ≥ timeout_ns×multiplier
-rdma.wait.ready_ns: 10000000                       # 序列等 env ready 与 rdma_dut_link 启动的上限，>0
+rdma.wait.ready_ns: 10000000                       # 序列等 env ready 的上限，>0
 rdma.wait.rxe_reply_ms: 10000                      # 仅 rxe：rxe_peer 每条命令的应答上限（真实 ms），1..2^31-1，不乘倍率
 
 # RDMA 场景：QP（全局，不分 Function；每次 rdma_run 新建 QP 时取值）
@@ -717,7 +717,7 @@ rdma.traffic.imm: ""                               # SEND_IMM/WRITE_IMM 立即�
 # 每个键依次取：命令参数 > rdma.run.<键>（plusarg 或 set_param，每次启动重读）> 行内注明的缺省。只接受整数字面量（十进制或 0x），
 #   不支持随机语法，非法值返回 ERROR 而不 fatal；叶名回退同样生效（+qps= 也会命中 rdma.run.qps）。
 # 另起一条可并发的同类命令：aip_bind_seq cmd=<名> type=rdma_run_seq sqr=rdma path=rdma.run_x（rdma_rx_wait_seq 同理）。
-rdma.run.f0: 0                                     # 示例；发起端（TX-only 为发送端、RX-only 为接收端）global Function ID，0..255，必给（用 group 时除外）
+rdma.run.f0: 0                                     # 示例；发起端（TX-only 为发送端、RX-only 为接收端）global Function ID，0..255，必给
 rdma.run.f1: 1                                     # 示例；双端模式的对端 global ID，0..255 且 ≠f0；tx_only/rx_only 时不读
 rdma.run.qps: 1                                    # 本次新建 QP 对数，≥1；rx_only 须为 1
 rdma.run.tx_only: 0                                # 1=只建发送端并核对首发完整帧；只支持 RC/UD 的 send/send_imm（违例为 UVM_FATAL）
@@ -725,7 +725,7 @@ rdma.run.rx_only: 0                                # 1=只建接收端、预投 
 rdma.run.dest_qpn: 0x12345                         # 示例；对端 QPN，缺省 rdma.qp.dest_qpn；tx/rx_only 须 1..0xffffff
 rdma.run.dest_qkey: 0x80010000                     # UD 对端 Q_Key，缺省 rdma.qp.qkey，≤0xffffffff
 rdma.run.dmac: 0x001122334455                      # 示例；对端 MAC（dst_mac 为别名），缺省 rdma.pkt.dst_mac；tx/rx_only 须非 0
-rdma.run.group: 0                                  # 示例；取 SV 声明的 cfg.flow_groups[N] 的 f0/f1/qps，与任何来源的其他键同用即报错
+# rdma_run 不再接受 group=（flow group 已删除，只剩 rdma_traffic_vseq 里供模型测试用的 SV 字段）；多对 Function 依次各发一条 rdma_run。
 rdma.rx_wait.timeout_us: 100                       # rdma_rx_wait 等 rx_only 登记的入站报文全部完成的上限，缺省 rdma.env.response_timeout_us，>0
 # rdma_stop [cmd=<名>]：不给时取消 rdma_run，给出时取消该名字的 rdma_run 类命令（如 aip_bind_seq 复制的）；空闲返回 OK，
 #   名字不存在或不是 rdma_run 类返回 ERROR。流量作为子 sequence 随命令一起取消，不销毁已建资源。
