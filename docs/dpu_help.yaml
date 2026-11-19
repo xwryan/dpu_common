@@ -1,0 +1,905 @@
+# DPU 验证平台参数说明（dpu_help.yaml）
+#
+# 列出 xwryan 各项目在仿真中读取的全部参数，一行一个：值是代码缺省值；标"示例"的行没有可用缺省，值只是示范。
+# 本文件只是参考，不被任何工具读取或编译。
+#
+# 传参：启动参数 +<键>=<值>，例如 +vio.pairs=1；Tcl：set_param path=<键> value=<值>，之后按各节说明执行 load_params 等命令。
+# 覆盖顺序、取值语法和枚举写法见第 1 节。请一律写完整键：裸字段名（如 +pairs=2）会命中所有同名字段。
+# 为保持 YAML 合法，少数值加了引号，这些引号不属于值。
+# 全大写的键（如 TAG_BIT、AIP_TCL）是原生 plusarg，写成 +NAME=值，不支持 set_param；<命令>.<参数> 形式的键（如
+# vio_tx.count、rdma_run.f0）只是 Tcl 命令参数的记法，在命令行上写成 vio_tx count=100。
+#
+# 对应代码：VPS ~/Documents 的本地提交（2026-11-19），* 表示该提交尚未推送到 GitHub。
+#   aip_core 8a56f4f*      dpu_common 0340e68    host_mem 830713f     pcie_work b0c0c33      inter_pcie 46a30a6
+#   net_packet fb8e2aa*    virtio_work 69b61f4*  rdma_work 5a800a0*   eth_seg_agent d792ca2* dpu_queue_work 5bd3211*
+#   flow_control 877eefc
+# host_mem 由第 9 节的 dpu.mem_* 配置，自身不读参数；flow_control 不读参数；simflow 是运行流程工具，不在本文范围。
+#
+# 目录
+#    1 通用规则（aip_core）               2 DPU 拓扑、地址与 Function           3 DUT 能力上限
+#    4 VIO qpair 分配                    5 QSCH                               6 MSI-X
+#    7 DPU 表访问窗口                     8 VIO 队列表策略                      9 Host memory
+#   10 PCIe TL（pcie_work）              11 VIO service                       12 VIO 等待策略
+#   13 Custom 私有队列                   14 VIO 运行期命令与参数                15 报文（net_packet）
+#   16 RDMA（rdma_work）                 17 组合顶层（rdma_work integration）  18 ETH 分段 agent（eth_seg_agent）
+#   19 DPU 控制队列（dpu_queue_work）     20 其他启动开关                       21 常用流程
+
+# -----------------------------------------------------------------------------
+# 1 通用规则（aip_core）
+# -----------------------------------------------------------------------------
+# 传参：启动参数 +<path>.<leaf>=值；Tcl set_param path=<key> value=<值>，或块写法 set_param { <key> <值> … }（每行一对，
+# 可写 # 注释行）；clear_param path=<key> 删单个覆盖，无参 clear_param 全清；SV 等价 aip_cmdline_override::set_val/clear。
+# 不写 value= 等于设空值。aip_core 不读参数文件，YAML/脚本最终都要展开成 +key=值；值含 {}[]:, 或空格时，在 shell 里给整个
+# +key=值 加引号（如 '+rdma.traffic.len=[1:256]'），值本身不带引号。
+# set_param 只存原文，下次执行读取宏时才求值、校验（写入成功不代表合法）；已建好的组件不会因改参自动重建。
+# 候选键：完整路径 → 别名（aip_cmdline_alias，如 net_packet 的 outer_ipv4 简写 ipv4）→ 裸叶名。先按此序查全部 override，
+# 再查 plusarg：override 一律优先（叶名 override 也压过完整路径 plusarg）；同一 plusarg 重复给出取最后一个。
+# 裸叶名命中所有同名叶子：+pairs=2 同时作用于 vio.pairs、vio.h0.pf0.i0.pairs、vio.mq.pairs 等，务必写完整路径。
+# 空值也算给出并屏蔽其后候选：空 plusarg 取宏默认值；空 override 对 aip_int/aip_string 取类型零值（不回退默认值），
+# _opt 宏保持原值。aip_cmdline_query::present 只判断键（含 key.x、key[i]、空值）是否给出，用于"给了才覆盖"。
+# 数值：十进制、0x/0b/0o/0d、'h/'b、8'hff，可加 _ 和正负号；超出目标位宽或显式位宽过大即 hard fatal，不截断。
+# 无符号目标（bit/logic 向量、*unsigned）与 aip_uint 出现负号即 hard fatal、不回绕；要全 1 就写出上界。
+# 随机：[a:b] 或 a:b 闭区间；a,b,c 或 [a,b,c] 等概率选一；{v:=w,[a:b]:/w}（或用 () 包裹）权重组，:= 每值、:/ 整段，
+# 权重可为 0 但不能全 0；inc:a:b[:s] / dec:a:b[:s] 从等差序列随机取一个（不是逐次递增）；rand 为全位宽随机。
+# aip_core 不认 random（整数/枚举直接报错），仅个别项目字符串参数自行支持（如 dpu.qsch.*）。随机源 $urandom，跟随
+# +ntb_random_seed；每次执行读取宏都重新抽样，日志打印抽中的值。字符串 a,b,c 随机选一。
+# 枚举：成员名（不区分大小写）、等于成员值的整数或整串 rand（全部成员）；逗号候选先全部校验再抽一个。
+# 位标志（aip_flags）：逗号分隔成员名取按位或，或单个整数掩码；不可混写、不支持随机，未知名称或越位 hard fatal。
+# 列表：<key>=1,2,3 整体赋值；<key>[i]=v 单元素；<key>.size=（仅动态数组，可随机）；<key>.each= 未覆盖元素逐个抽样；
+# <key>.unique=0|1；<key>.sort=asc|desc；整数数组另有 seq:a:b[:s] 展开、perm:a:b 随机排列（≤1000000 个）。
+# 优先级 [i] > 整体列表 > .each > 默认，越界索引忽略。解析错误一律打印 [FATAL]（用户文件行号、+参数名、原文）
+# 并 $fatal(1)，不回退默认值；回归请加 simv -exitstatus 以拿到非 0 退出码。
+# 日志：每次宏读取打印 [aip_cmdline] param '<leaf>' (scope='<path>') = 值（数组为 array、队列为 queue_summary），
+# 按完整键限次；直接调用 get_single_value 不打印。下面两个开关在首次打印时读一次，之后改用 Tcl
+# set_cmdline_print enable=0|1 max_prints=N（并清零计数）；set_param/clear_param 另打印 [SET_PARAM]/[CLEAR_PARAM]。
+# 快照：aip_restore 后重新 source 加载脚本，参数宏改读本次 simv 的 plusargs；快照内 set_param 覆盖仍优先，已赋值变量不刷新。
+# 等待策略 <prefix>.wait.poll_ns/timeout_ns/multiplier/max_polls（aip_wait_policy，默认 10ns/10000ns/1/10000，须 1..2^32-1）
+# 由各 env 传前缀读取。AIP 命令参数为 key=value；wait=0|1 为框架保留键（默认 1），seq 命令另有 count=N（默认 1）/ time=T，
+# 同名命令运行中再发返回 BUSY。Tcl 变量（非 plusarg）：::aip_echo 1、::aip_ack_timeout_ns 52000、::aip_ckpt_dir ./aip_ckpt；
+# 命令看门狗用 Tcl set_cmd_watchdog ns=N 调（默认 50000，0 禁用）。
+aip_cmdline.print_enable: 1                        # 参数读取日志总开关，0 关闭（解析与报错照常）
+aip_cmdline.max_prints: 10                         # 每个完整键最多打印次数；-1 不限，0 不打印
+SCB_REPORT_LIMIT: 10                               # 原生 plusarg；各 aip_scb 报告列出的问题 stream 数，-1 全部，0 只汇总，仅十进制
+
+# -----------------------------------------------------------------------------
+# 2 DPU 拓扑、地址与 Function（dpu_common：dpu_env_cfg、dpu_device_cfg）
+# -----------------------------------------------------------------------------
+# build 时读取。Tcl load_params 只重读 reg_target、print_bar_map、configure_*、verify_readback、dpu.qsch.*、
+# 各表 reg_target、dpu.*.msix.* 和第 8 节的队列表策略；hosts、pfs_per_host、vfs_per_pf、driver_layouts 重载时不能改。
+dpu.hosts: 1                                       # Host 数，1..dpu.caps.max_hosts
+dpu.pfs_per_host: 1                                # 每 Host 的 PF 数，1..4 且 ≤dpu.caps.max_pfs_per_host
+dpu.vfs_per_pf: 0                                  # 每 PF 的 VF 数，≤dpu.caps.max_vfs_per_pf；Function 总数 ≤dpu.caps.max_functions
+dpu.af_host: 0                                     # AF 所在 Host，须是已创建的 Host
+dpu.af_pf: 0                                       # AF 只能是 PF0
+dpu.af_kind: DPU_FUNCTION_PF                       # 须为 DPU_FUNCTION_PF
+dpu.af_vf: 0                                       # 须为 0
+dpu.reg_target: pf0.bar0                           # 表访问缺省窗口 [hH.]pfP[.vfV].barB；省略 hH 时用表项所属 Host
+dpu.print_bar_map: 1                               # 打印实际分配的 BAR 地址
+dpu.configure_public: 0                            # 是否写公共 BAR/PF/VF 等表
+dpu.configure_bdf: 1                               # 是否写 BDF requester 表
+dpu.driver_layouts: 1                              # 用驱动参考表布局补全未声明的表
+dpu.verify_readback: 0                             # 普通表项写后读回校验
+
+# 地址窗口：每个 Host 一个独立地址空间；dpu.hH.* 覆盖 dpu.*，字段相同。
+dpu.mem_base: 0x100000000                          # Host 内存窗口起点（4GB）；mem_base、mem_size 给出任一个才生效，并置 use_gpa=1
+dpu.mem_size: 0xfffeffff00000000                   # 缺省到 0xffff000000000000；base+size 须小于 2^64
+dpu.mmio_base: 0x100000000                         # BAR 窗口起点，与内存同一地址空间；mmio_base、mmio_size 规则同上
+dpu.mmio_size: 0x1fffffff00000000                  # 缺省到 2^61；BAR 须低于 2^61（Notify 表只存地址 [60:7]），窗口内随机放置
+dpu.address_width: 64                              # Host 地址宽度，1..64
+dpu.use_gpa: 1                                     # 启用 Host 内存窗口；VIO 平台要求为 1
+dpu.bar_policy: DPU_BAR_PLACEMENT_RANDOM           # BAR 放置：DPU_BAR_PLACEMENT_RANDOM / DPU_BAR_PLACEMENT_FIRST_FIT
+dpu.roles: DPU_BAR_DEVICE_MEMORY,DPU_BAR_MAILBOX,DPU_BAR_MSIX # BAR 窗口允许的 role，给出即整体替换
+dpu.bdf_first: 0x0010                              # BDF 范围起点，≤bdf_last
+dpu.bdf_last: 0x0fff                               # BDF 范围终点
+dpu.reserved_bdfs: 0x0101,0x0102                   # 示例；预留 BDF 列表，缺省为空
+# Host 层可覆盖的字段：address_width、mem_base、mem_size、use_gpa、mmio_base、mmio_size、bar_policy、roles、bdf_first、
+# bdf_last、reserved_bdfs，写成 dpu.hH.<字段>。
+dpu.h0.mem_base: 0x0000100000000000                # 示例；只改 Host0 的内存窗口起点
+dpu.h0.mmio_base: 0x0000200000000000               # 示例；只改 Host0 的 BAR 窗口起点，窗口须低于 2^61
+
+# Function 覆盖：PF 用 dpu.hH.pfP，VF 用 dpu.hH.pfP.vfV，字段相同。dpu.vf_pool.*、dpu.hH.domainN.* 不会被读取。
+dpu.h0.pf0.bdf_mode: DPU_ALLOC_AUTO                # DPU_ALLOC_AUTO / DPU_ALLOC_PINNED
+dpu.h0.pf0.bdf: 0x0100                             # 示例；PINNED 时的 BDF，须在 bdf_first..bdf_last 且未预留
+dpu.h0.pf0.segment: 0                              # PCIe segment，当前只有 0
+dpu.h0.pf0.services: DPU_SERVICE_VIO_NET           # 可承载的 service 列表：DPU_SERVICE_VIO_NET/RDMA/VBLK
+dpu.h0.pf0.requester: 0                            # requester ID 0..65535；requester/intel_pf/intel_vf/vport 须同时给，只有无 VF 时的 PF0 有缺省
+dpu.h0.pf0.intel_pf: 0                             # Intel PF 编号 0..7
+dpu.h0.pf0.intel_vf: -1                            # PF 必须为 -1；VF 为 0..2047
+dpu.h0.pf0.vport: 0                                # vport 0..1023
+dpu.h0.pf0.bdf_index: 0                            # BDF 表索引 0..127，缺省等于 vport
+dpu.h0.pf0.bar0.placement: DPU_ALLOC_AUTO          # BAR 放置：DPU_ALLOC_AUTO / DPU_ALLOC_PINNED；BAR 名为 bar0/bar2/bar4
+dpu.h0.pf0.bar0.base: 0                            # PINNED 基址：按大小对齐、在 BAR 窗口内、不与其他 BAR 或预留区重叠
+dpu.h0.pf0.bar0.size: 0x2000000                    # 须等于 DUT profile：PF bar0/2/4 = 32MB/64KB/64KB，VF = 16KB/16KB/32KB
+# bar<B>.role / bar / alignment 同样只能等于 DUT profile（role 依次为 DEVICE_MEMORY/MAILBOX/MSIX，alignment 等于 size）。
+dpu.h0.pf0.vf0.requester: 0                        # 示例；VF 路由四项须同时给
+dpu.h0.pf0.vf0.intel_pf: 0                         # 示例；VF 所属 Intel PF
+dpu.h0.pf0.vf0.intel_vf: 0                         # 示例；Intel VF 编号 0..2047
+dpu.h0.pf0.vf0.vport: 1                            # 示例；VF vport 0..1023
+dpu.h0.pf0.vf0.bdf_index: 1                        # 示例；VF 的 BDF 表索引 0..127，缺省等于 vport
+
+# -----------------------------------------------------------------------------
+# 3 DUT 能力上限（dpu_common：dpu_dut_caps，路径 dpu.caps）
+# -----------------------------------------------------------------------------
+dpu.caps.max_hosts: 2                              # 最大 Host 数，1..4
+dpu.caps.max_pfs_per_host: 4                       # 每 Host 最大 PF 数，1..16
+dpu.caps.max_vfs_per_pf: 16                        # 每 PF 最大 VF 数，1..16
+dpu.caps.max_functions: 1024                       # 最大 Function 数，1..1024
+dpu.caps.global_msix_vector_count: 256             # 全局 MSI-X 向量数，1..256
+dpu.caps.mailbox_msix_vectors: 1                   # 每 Function 的 mailbox 向量数；0 表示不分配控制中断向量
+dpu.caps.af_extra_msix_vectors: 13                 # AF 额外 MSI-X 向量数，≥af_extra_queue_count
+dpu.caps.af_extra_queue_count: 11                  # AF 额外队列数，0..11
+dpu.caps.vio_global_qpair_count: 2048              # VIO 全局队列对池容量，1..2048
+dpu.caps.max_vio_net_qpairs_per_device: 32         # 单 Function 最大队列对，1..32
+dpu.caps.vio_notify_entries_per_bank: 128          # Notify 单 bank 表项数，1..1024
+
+# -----------------------------------------------------------------------------
+# 4 VIO qpair 分配
+# -----------------------------------------------------------------------------
+# 环境不读 dpu.qpairs、dpu.requestN.*、dpu.fixed_devices、dpu.placement_seed 等 placement 参数：
+# 每个启用的 VIO service 生成一个固定请求，队列对数取 vio.pairs，每个 qpair 一个 LAN MSI-X 向量；
+# 池容量和单 Function 上限分别由 dpu.caps.vio_global_qpair_count、dpu.caps.max_vio_net_qpairs_per_device 决定。
+
+# -----------------------------------------------------------------------------
+# 5 QSCH（dpu_common）
+# -----------------------------------------------------------------------------
+dpu.qsch.configure_controls: 1                     # 是否写 QSCH 控制表
+dpu.qsch.mode: 0                                   # 0=VNET，1=ETS；AUTO/RANDOM 拓扑须为 0，须等于各 service 的 qsch.ets
+dpu.qsch.mode_offset: 0xb001c0                     # QSCH mode 寄存器偏移，4B 对齐
+dpu.qsch.vports: 128                               # DUT vport 数，1..1024；RDMA net 从此编号开始
+dpu.qsch.dbq_pages: 4                              # 每个有 RDMA 的 Host 的 DBQ 2MB 页数，1..512
+dpu.qsch.rdma_vfs: 128                             # RDMA 可用 VF 数，1..256；grant 的 rdma_vf_id 须小于它
+dpu.qsch.spwrr: 0xff                               # SP/WRR 值，≤0xff，每个 net 一项
+dpu.qsch.tc_weight: 0x11111111                     # TC weight，32 位，每个 net 一项
+dpu.qsch.topology: DPU_QSCH_AUTO                   # DPU_QSCH_AUTO / DPU_QSCH_RANDOM / DPU_QSCH_MANUAL
+dpu.qsch.eth_ports: 8                              # ETH 端口数，1..8；MANUAL 时各 service 用自己的 qsch.eth_ports
+dpu.qsch.print: 0                                  # 打印 Function/net/group 关联
+dpu.qsch.net_id: random                            # 示例；net 号表达式（固定值、范围、rand），0..1023，全局唯一；缺省 AUTO 取全局 Function ID
+dpu.qsch.group_id: random                          # 示例；组号表达式；缺省 AUTO 取 host_id*16+dpt，RANDOM 取 rand
+dpu.qsch.dpt: 0                                    # 目的节点：ETHn=n，HOSTh=eth_ports+h（h<5）；可写 rand 或范围
+# 以下是队列表策略中 qsch.* 字段的最底层，第 8 节的 vio、vio.hH、vio.hH.pfP[.vfV].i0 层依次覆盖。
+# 某一层给出任一策略键，即为该层下的每个 service 生成策略。
+dpu.qsch.cos: 0                                    # service COS，0..7
+dpu.qsch.net_base: 0                               # MANUAL：net = net_base + pair*net_stride，须 <1024
+dpu.qsch.net_stride: 0                             # MANUAL net 步长；0 表示全部 pair 同一 net
+dpu.qsch.ets: 0                                    # service ETS，须等于 dpu.qsch.mode
+dpu.qsch.ets_priority: 0                           # MANUAL 且 ets=1 时的 lvl2，0..7
+dpu.qsch.distinguish_business: 0                   # 读取但不参与表编码
+
+# -----------------------------------------------------------------------------
+# 6 MSI-X（dpu_common）
+# -----------------------------------------------------------------------------
+# 路径 dpu.msix → dpu.hH.msix → dpu.hH.pfP[.vfV].msix，后者覆盖前者；值须非负。
+# 不给 msg_data_base 就不生成任何消息；vio.completion_mode=VIRTIO_COMPLETION_MSIX（缺省）时须给。
+dpu.msix.msg_data_base: 0x13572468                 # 示例；Message Data 模板，32 位
+dpu.msix.msg_data_stride: 0                        # 相邻向量的 Data 步长，32 位
+dpu.msix.msg_addr_base: 0x900000000000             # 示例；不给时每个 Function 在本 Host 窗口内随机选一个 4KB 页并预留
+dpu.msix.msg_addr_stride: 0                        # 相邻向量的地址步长；随机页且未给时取 4；同一 Host 内 (地址,Data) 不能重复
+dpu.msix.table_bar: 0                              # table 所在 BAR，给出 table_offset 时生效
+dpu.msix.table_offset: 0x54000                     # 示例；给出才用 Function BAR 内的 table（≥0x20000、16B 对齐，只放得下 PF BAR0），否则用驱动布局
+dpu.msix.table_size: 64                            # 示例；table 项数 1..1024，给 table_offset 时必填
+dpu.msix.pba_bar: 0                                # PBA 所在 BAR
+dpu.msix.pba_offset: 0x56000                       # 示例；≥0x10000、8B 对齐，同一 BAR 时不得与 table 重叠
+dpu.msix.pba_words: 8                              # 示例；PBA 的 64 位 word 数，≥1
+dpu.msix.interval_rate: 0                          # interval rate，0..65535
+dpu.msix.interval_packets: 0                       # interval 包数阈值，0..65535
+dpu.msix.self_mask: 0                              # self mask，0/1
+dpu.msix.table_only_enable: 1                      # 只靠 table mask 使能，0/1
+dpu.msix.control_irq: 0                            # 1：mailbox、MAC age、PTP stamp 控制向量进入 MSI-X 编程，须有消息模板；build 后不能新增
+dpu.h0.pf1.msix.control_irq: 1                     # 示例；没有 VIO 队列的非 AF Function 也分配 mailbox 向量（dpu_queue_work 的 mbx.msix 需要）
+dpu.msix.v0.msg_addr: 0x900000000000               # 示例；逐向量覆盖，v<N> 的 N 为本地向量号 0..63
+dpu.msix.v0.msg_data: 0x13572468                   # 示例；32 位
+dpu.msix.v0.masked: 0                              # 0/1
+
+# -----------------------------------------------------------------------------
+# 7 DPU 表访问窗口（reg_target）
+# -----------------------------------------------------------------------------
+# 缺省全部继承 dpu.reg_target。同一张表按 家族键 → 明细键 → vio.* 依次覆盖；以下值都是示例。
+# AF、PFVF、BAR、COMPLETION_BDF、TLP_PREFIX、MSIX_CONTROL、MSIX_FUNCTION、QUEUE_AUX 没有驱动布局，需要 SV 提供布局才会写。
+dpu.bar_map.reg_target: h0.pf0.bar0                # BAR 表家族，dpu.bar.reg_target 可覆盖
+dpu.bar.reg_target: h0.pf0.bar0                    # BAR 表
+dpu.msix.reg_target: h0.pf0.bar0                   # MSI-X 家族：msix_linear/info/interval/control/table/function 六张表
+dpu.msix_linear.reg_target: h0.pf0.bar0            # MSI-X linear 表；省略 hH 时用 Host0
+dpu.msix_info.reg_target: h0.pf0.bar0              # MSI-X info 表
+dpu.msix_interval.reg_target: h0.pf0.bar0          # MSI-X interval 表
+dpu.msix_control.reg_target: h0.pf0.bar0           # MSI-X control 表
+dpu.msix_table.reg_target: h0.pf0.bar0             # MSI-X table 表
+dpu.msix_function.reg_target: h0.pf0.bar0          # MSI-X function 表
+dpu.qsch.reg_target: h0.pf0.bar0                   # QSCH 家族：qsch_q2tc/n2g/g2p/spwrr/tc_weight/rnet 六张表
+dpu.qsch_q2tc.reg_target: h0.pf0.bar0              # QSCH Q2TC 表
+dpu.qsch_n2g.reg_target: h0.pf0.bar0               # QSCH N2G 表
+dpu.qsch_g2p.reg_target: h0.pf0.bar0               # QSCH G2P 表
+dpu.qsch_spwrr.reg_target: h0.pf0.bar0             # QSCH SPWRR 表
+dpu.qsch_tc_weight.reg_target: h0.pf0.bar0         # QSCH TC weight 表
+dpu.qsch_rnet.reg_target: h0.pf0.bar0              # QSCH RNET 表（RDMA）
+dpu.af.reg_target: h0.pf0.bar0                     # AF 表
+dpu.pfvf.reg_target: h0.pf0.bar0                   # PF/VF 映射表
+dpu.bdf.reg_target: h0.pf0.bar0                    # BDF requester 表
+dpu.completion_bdf.reg_target: h0.pf0.bar0         # Completion BDF 表
+dpu.tlp_prefix.reg_target: h0.pf0.bar0             # TLP prefix 表
+dpu.vio_notify.reg_target: h0.pf0.bar0             # VIO Notify 表；省略 hH 时用 Host0
+dpu.rdma_notify.reg_target: h0.pf0.bar0            # RDMA Notify 表；省略 hH 时用 Host0
+dpu.vtx.reg_target: h0.pf0.bar0                    # VTX 队列表
+dpu.vrx.reg_target: h0.pf0.bar0                    # VRX 队列表
+dpu.queue_aux.reg_target: h0.pf0.bar0              # Queue AUX 表
+vio.vtx.reg_target: h0.pf0.bar0                    # 覆盖 dpu.vtx.reg_target
+vio.vrx.reg_target: h0.pf0.bar0                    # 覆盖 dpu.vrx.reg_target
+vio.notify_table.reg_target: h0.pf0.bar0           # 覆盖 dpu.vio_notify.reg_target
+
+# -----------------------------------------------------------------------------
+# 8 VIO 队列表策略（dpu_common 读取，写 VTX/VRX/QSCH/Notify 表用）
+# -----------------------------------------------------------------------------
+# 层顺序 dpu（只读 qsch.*）→ vio → vio.hH → vio.hH.pfP[.vfV].i0，后层覆盖前层；未给的字段取 0。
+# 某层给出任一键即为该层下的 service 生成策略；有队列的 service 没有策略时写表报 "queue platform policy missing"。
+# 下面标"须"的几项不给就无法写表：notify_net_pair5=1；开 RX 时 prefetch_ram、dsc_pre_max_num 与 prefetch_slots。
+vio.notify_net_pair5: 1                            # 须为 1（缺省 0 时生成 Notify 表报错）：单 bank pair5 是唯一支持的编码
+vio.notify_table_bar: 0                            # 可选；Notify 查找基址所在 BAR；本项和下项都未给时取实际 doorbell 地址 [60:7]
+vio.notify_table_offset: 0                         # 可选；查找基址的 BAR 内偏移，给出任一项即校验与 doorbell 高位一致
+vio.vtx.dma_info: 0                                # VTX DMA 信息，0..15
+vio.vtx.tail_buf_id_dis: 0                         # 禁止 tail buffer ID，0/1
+vio.vtx.redraw_en: 0                               # redraw 开关，0/1
+vio.vtx.high_speed_mode: 0                         # 高速模式 0/1；为 1 时队列深度须 ≥128
+vio.vtx.seg_en: 0                                  # 分段开关，0/1
+vio.vtx.interl_seg_en: 0                           # 交错分段开关，0/1
+vio.vrx.dsc_pre_max_num: 3                         # 示例（缺省 0）；预取深度编码 0/1/2/3/≥4 = 256/128/64/32/16 槽，须小于 vio.queue_size
+vio.vrx.dsc_pre_read_threshold: 0                  # VRX 预读阈值，0..3
+vio.vrx.dsc_dma_num: 0                             # VRX DMA 数量，0..3
+vio.vrx.dsc_mode: 0                                # 须为 0（不支持 head split）
+vio.vrx.payload_dsc_len: 0                         # 须为 0
+vio.vrx.head_dsc_len: 0                            # 须为 0
+vio.prefetch_ram: ram_h0                           # 示例（缺省空）；VRX 预取 RAM 名，开 RX 时须给；同名 RAM 跨 service、Host 检查重叠
+vio.prefetch_start: 0                              # 起始槽，按预取深度对齐；start + pairs×深度 ≤32768（fpga=1 时 16384）
+vio.prefetch_slots: 32                             # 示例（缺省 0）；开 RX 时须等于 dsc_pre_max_num 对应的深度
+vio.fpga: 0                                        # 1=FPGA：global qpair 须 <512，预取 RAM 只有 16384 槽
+vio.qsch.cos: 0                                    # Q2TC COS，0..7，所有拓扑都用
+vio.qsch.net_id: random                            # 示例；AUTO/RANDOM 的 net 号表达式，只按 vio 三层取，为空时用 dpu.qsch.net_id
+vio.qsch.group_id: 20                              # 示例；MANUAL 时为固定组号（<1024），AUTO/RANDOM 时为组号表达式
+vio.qsch.dpt: 0                                    # AUTO/RANDOM 的目的节点表达式，为空时用 dpu.qsch.dpt
+vio.qsch.net_base: 0                               # MANUAL：net = net_base + pair×net_stride，须 <1024
+vio.qsch.net_stride: 0                             # MANUAL net 步长
+vio.qsch.eth_ports: 8                              # 示例（缺省 0）；MANUAL 时须 1..8；AUTO/RANDOM 用 dpu.qsch.eth_ports
+vio.qsch.ets: 0                                    # 0/1，须等于 dpu.qsch.mode
+vio.qsch.ets_priority: 0                           # MANUAL 且 ets=1 时作 G2P lvl2，0..7
+vio.qsch.distinguish_business: 0                   # 读取但不参与表编码
+vio.h0.pf0.i0.qsch.net_id: 100                     # 示例；只给 h0.pf0 的 service 固定 Net ID
+
+# -----------------------------------------------------------------------------
+# 9 Host memory（host_mem；两个参考顶层 build 时经 vio_platform 读取）
+# -----------------------------------------------------------------------------
+dpu.mem_mode: MODE_BUDDY                           # 分配器：MODE_BUDDY / MODE_LINEAR
+dpu.mem_granule: 16                                # 最小分配粒度，2 的幂，1..64
+dpu.mem_policy: HOST_MEM_RANDOM                    # 分配位置：HOST_MEM_RANDOM（随种子）/ HOST_MEM_FIRST_FIT
+
+# -----------------------------------------------------------------------------
+# 10 PCIe TL（pcie_work：pcie_tl_env_config、pcie_wait_policy）
+# -----------------------------------------------------------------------------
+# 只在 build 时读取，Tcl load_params 不重载。旧前缀 +pcie_cfg.* 和 +pcie.cpl_timeout_ns 出现即 fatal。
+pcie.fc_enable: 1                                  # Flow Control 开关
+pcie.infinite_credit: 1                            # 项目固定为 1（Intel 侧自管 credit），给 0 报错；VIP 类本身缺省 0
+pcie.init_ph_credit: 32                            # Posted Header credit，0..2^31-1
+pcie.init_pd_credit: 256                           # Posted Data credit
+pcie.init_nph_credit: 32                           # Non-Posted Header credit
+pcie.init_npd_credit: 256                          # Non-Posted Data credit
+pcie.init_cplh_credit: 32                          # Completion Header credit
+pcie.init_cpld_credit: 256                         # Completion Data credit
+pcie.shaper_enable: 0                              # 带宽整形
+pcie.avg_rate: 0.0                                 # 平均速率 bytes/ns，≥0；shaper_enable=1 时须 >0
+pcie.burst_size: 4096                              # 整形 burst 大小，≥1
+pcie.extended_tag_enable: 1                        # Extended Tag；+TAG_BIT= 可覆盖（见第 10 节末）
+pcie.phantom_func_enable: 0                        # Phantom Function
+pcie.max_outstanding: 1024                         # 最大 outstanding 数，1..1024；extended_tag_enable=0 时 ≤256
+pcie.max_payload_size: MPS_256                     # 最大 Payload Size，只接受 mps_e 枚举名
+pcie.max_read_request_size: MRRS_512               # 最大 Read Request Size，只接受 mrrs_e 枚举名
+pcie.read_completion_boundary: RCB_64              # Read Completion Boundary，只接受 rcb_e 枚举名
+pcie.relaxed_ordering_enable: 1                    # Relaxed Ordering
+pcie.id_based_ordering_enable: 1                   # ID Based Ordering
+pcie.bypass_ordering: 0                            # 绕过 ordering 检查
+pcie.cov_enable: 0                                 # PCIe coverage 总开关
+pcie.tlp_basic_cov: 0                              # TLP coverage
+pcie.fc_state_cov: 0                               # FC state coverage
+pcie.tag_usage_cov: 0                              # Tag usage coverage
+pcie.ordering_cov: 0                               # Ordering coverage
+pcie.error_inject_cov: 0                           # Error injection coverage
+pcie.scb_enable: 1                                 # PCIe scoreboard
+pcie.ordering_check_enable: 1                      # Ordering 检查
+pcie.completion_check_enable: 1                    # Completion 检查
+pcie.data_integrity_enable: 1                      # 数据完整性检查
+pcie.scb_strict_check: 1                           # 严格 scoreboard 检查
+pcie.ep_auto_response: 0                           # 项目固定为 0（EP 是真实 DUT），给 1 报错；VIP 类本身缺省 1
+pcie.link_delay_enable: 0                          # 链路延迟
+pcie.rc2ep_latency_min_ns: 0                       # RC→EP 最小延迟，≤max
+pcie.rc2ep_latency_max_ns: 0                       # RC→EP 最大延迟
+pcie.ep2rc_latency_min_ns: 0                       # EP→RC 最小延迟，≤max
+pcie.ep2rc_latency_max_ns: 0                       # EP→RC 最大延迟
+pcie.link_delay_update_interval: 16                # 延迟更新间隔，≥1
+pcie.wait.cpl_ns: 50000                            # RC Completion/Tag 超时（ns，×multiplier）
+pcie.wait.rb_ns: 50000                             # 寄存器 read-back 等待上限（ns，×multiplier），未给时跟随 cpl_ns
+pcie.wait.poll_ns: 10                              # 轮询间隔（ns）
+pcie.wait.timeout_ns: 10000                        # driver 发送顺序、FC、带宽、adapter tlp_ready 等待上限（ns）
+pcie.wait.multiplier: 1                            # pcie.wait 全部超时的倍率
+pcie.wait.max_polls: 10000                         # 须满足 max_polls×poll_ns ≥ timeout_ns×multiplier
+
+# PCIe 原生 plusarg（pcie_tl_vip，不走 aip_core）
+# 原生 $value$plusargs，不走 aip_core（无 set_param、无叶名回退）。前 5 个由 VIP 自带 EP 模型的 config proxy
+# （每个 ep_agent 一份）在 build_phase 读取，只在 bypass 打开、EP agent 为 active 且 pcie.ep_auto_response=1 时
+# 用于直接应答 CfgRd/CfgWr；DUT 作 EP 的项目流程（禁止 ep_auto_response）中无效。
+BYPASS_CONFIG: 0                                   # 须写 +BYPASS_CONFIG=1（十进制非 0 开启）；裸 +BYPASS_CONFIG 不生效
+CFG_VENDOR_ID: 1AF4                                # 十六进制数字（%h，建议不带 0x），取低 16 位；bypass 配置空间 Vendor ID
+CFG_DEVICE_ID: 1041                                # 十六进制数字（%h），取低 16 位；bypass 配置空间 Device ID
+CFG_BAR0_SIZE: 65536                               # 十进制字节数，须 2^N（代码不检查）；bypass 时 BAR0 sizing 掩码
+CFG_MSIX_VECTORS: 4                                # 十进制；只读入并打印，MSI-X 能力固定 4 项，当前无实际效果
+TAG_BIT: 8                                         # 示例；仅 8 或 10，否则 fatal；10 → extended_tag_enable=1、max_outstanding=1024，8 → 0、256
+# TAG_BIT 由 pcie_tl_env build_phase 读取，覆盖 pcie.* 已读入的 extended_tag_enable/max_outstanding（SR-IOV 时同步
+# 10-bit Tag 能力位）；不给则沿用 pcie.*（代码默认 10-bit、1024）。pcie_work/sim/run.sh 默认传 +TAG_BIT=8。
+# +PCIE_TOPOLOGY= / +PCIE_GEN= 只在 tests/pcie_tl_custom_base_test.sv 读取，属测试代码。
+
+# -----------------------------------------------------------------------------
+# 11 VIO service（virtio_work：virtio_net_env_config）
+# -----------------------------------------------------------------------------
+# 层顺序 vio → vio.hH → vio.hH.pfP[.vfV].i0，后层覆盖前层（显式 0 也算），实例号固定 i0。
+# 两个参考顶层（virtio 的 project_env、rdma 的 dpu_top_env）都用外部配置模式，缺省 REAL_DUT、vio.pairs=0。
+# Tcl load_params 重载时不能改：各 service 的 enabled、pairs、queue_type、features，以及 exec_mode、iova_*、iommu_strict、
+# scb、coverage、dpu.mem_*；其余 service 键（方向开关、queue_size、notify、completion 等）可在重载时修改。
+vio.enabled: 1                                     # 是否创建 VIO service；最终还要求 tx_enable 或 rx_enable 为 1 且 pairs≠0
+vio.tx_enable: 1                                   # 是否启用 TX
+vio.rx_enable: 1                                   # 是否启用 RX
+vio.pairs: 0                                       # 队列对数 0..32（另受 dpu.caps 限制）；项目缺省 0 即不建 VIO 队列，VIP 类本身缺省 1
+vio.queue_size: 256                                # 环深度，2 的幂；写 DUT 表要求 32..32768，Custom 队列 ≤4096
+vio.queue_type: VQ_PACKED                          # 整个 service 的队列格式，有队列时须显式给 VQ_PACKED 或 VQ_CUSTOM（类缺省 VQ_SPLIT 会被拒绝）
+vio.features: VERSION_1,RING_PACKED                # Packed 缺省即此值（掩码 0x0000000500000000）；Custom 不能给非 0 特性
+# 特性名是规范名去掉 VIRTIO_F_/VIRTIO_NET_F_ 前缀，逗号分隔、不区分大小写；也可写一个整数掩码，二者不能混写，未知名称报错。
+# Packed 必须含 VERSION_1、RING_PACKED，另可选 RING_EVENT_IDX、IN_ORDER、NOTIFICATION_DATA、ACCESS_PLATFORM、CSUM、
+# HOST_TSO4、HOST_TSO6、HOST_USO；TSO/USO 须同时有 CSUM。特性只声明能力，每包 offload 由 vio.tx.csum/gso/mss 请求。
+vio.napi_budget: 64                                # 每轮完成处理上限，≥1
+vio.rx_refill: 16                                  # RX 空闲达到此值时补满，≥1
+vio.rx_auto_refill: 1                              # 自动补充 RX buffer，0/1
+vio.rx_buf_size: 2048                              # 示例；标准 RX 队列的报文容量（不含 Virtio 头）；未设时 buffer 总长 1526 字节（含头）
+vio.completion_mode: VIRTIO_COMPLETION_MSIX        # VIRTIO_COMPLETION_MSIX / VIRTIO_COMPLETION_POLLING；MSIX 须有 dpu.msix 消息模板
+vio.notify_bar: 0                                  # doorbell 所在 BAR，0..5
+vio.notify_base: 0                                 # 队列 0 doorbell 的 BAR 内偏移；标准队列须显式给出（出现即生效），否则写表报 no explicit doorbell binding
+vio.notify_stride: 0                               # doorbell 偏移 = notify_base + 本地 qid×stride，须 ≤0xffffffff、对齐且在 BAR 内
+vio.notify_encoding: VIO_NOTIFY_QID16              # 标准队列：QID16 / DATA32（需 NOTIFICATION_DATA）/ DPU32；Custom 未给 notify_base 时用 DPU32
+vio.h0.pf0.i0.pairs: 1                             # 示例；只给 Host0 PF0 的 service 1 个队列对
+vio.h0.pf0.i0.rx_enable: 0                         # 示例；只关闭 Host0 PF0 的 RX
+vio.h0.pf0.vf0.i0.pairs: 2                         # 示例；VF 的 service 路径为 vio.hH.pfP.vfV.i0
+vio.h0.pf0.vf0.i0.features: VERSION_1,RING_PACKED,RING_EVENT_IDX # 示例；只改 VF0 的特性
+
+# 以下只读 vio、vio.hH（service 层写了也不读），只在 build 时读取。
+vio.exec_mode: VIRTIO_EXEC_REAL_DUT                # 项目只接受 REAL_DUT，hH 层须与全局一致；VIP 类本身缺省 MODEL
+vio.iova_base: 0x0000000080000000                  # 设备可见 IOVA 起点，4KB 对齐、非零
+vio.iova_size: 0xffffffff7ffff000                  # IOVA 空间大小，4KB 对齐、非零，base+size 不溢出
+vio.iova_policy: IOMMU_IOVA_RANDOM                 # IOMMU_IOVA_RANDOM / IOMMU_IOVA_FIRST_FIT
+vio.iommu_strict: 1                                # IOMMU 严格检查，0/1
+vio.scb: 1                                         # VIO scoreboard；当前只统计 monitor 事件并检查 DMA 访问，不比对报文
+vio.coverage: 0                                    # 1 时创建 VIO coverage 组件，但各分组开关无人打开，实际不采样
+
+# -----------------------------------------------------------------------------
+# 12 VIO 等待策略（virtio_wait_policy，单位 ns，只读 vio、vio.hH）
+# -----------------------------------------------------------------------------
+vio.wait.poll_ns: 10                               # 轮询间隔，1..2^32-1
+vio.wait.timeout_ns: 10000                         # 缺省等待超时；也是 vio_* 命令无进展的停滞上限
+vio.wait.reset_ns: 5000                            # 设备 reset 等待
+vio.wait.queue_reset_ns: 5000                      # 队列 reset 等待
+vio.wait.vf_ready_ns: 10000                        # VF ready 等待
+vio.wait.flr_ns: 10000                             # FLR 等待
+vio.wait.cpl_ns: 50000                             # PCIe Completion 等待
+vio.wait.rx_wait_ns: 50000                         # RX 补充停滞上限
+vio.wait.multiplier: 1                             # 全部超时倍率
+vio.wait.max_polls: 10000                          # 最大轮询次数
+
+# -----------------------------------------------------------------------------
+# 13 Custom 私有队列（vio.queue_type=VQ_CUSTOM 的 service 才读）
+# -----------------------------------------------------------------------------
+# 先逐层读 <层>.private.*，再逐层读 <层>.private.qN.*（N 为队列号：RX=2i、TX=2i+1），qN 优先。
+vio.private.queue_size: 256                        # 可不给，缺省等于 vio.queue_size；给了须相等，2..4096 的 2 的幂
+vio.private.rx_buf_size: 2048                      # Custom RX buffer 大小，64..16383
+vio.private.local_qid_base: 0                      # 偶数 ≤254；外部流程要求本地 QID 等于队列号，只能为 0
+vio.private.notify_bar: 0                          # 私有 doorbell BAR，≤5；给出时替换该队列 doorbell
+vio.private.notify_offset: 0                       # 私有 doorbell 偏移，≤0xffffffff、4B 对齐
+vio.private.dport_info: 0                          # 目的端口信息，≤4095
+vio.private.dport_id: 0                            # 目的端口 ID，≤1023
+vio.private.dport_type: 0                          # 目的端口类型，≤7
+vio.private.cpu_tx_cos: 0                          # CPU TX COS，≤7
+vio.private.rss_lag: 0                             # RSS LAG，0/1
+vio.private.l3_cs: 0                               # 外层 L3 checksum，0/1
+vio.private.l4_cs: 0                               # 外层 L4 checksum，0/1
+vio.private.i_l3_cs: 0                             # 内层 L3 checksum，0/1
+vio.private.i_l4_cs: 0                             # 内层 L4 checksum，0/1
+vio.private.fwd: 1                                 # Forward mode，0..3
+vio.private.q1.dport_id: 5                         # 示例；只改队列 1（pair 0 的 TX）
+vio.private.q0.notify_offset: 0x1000               # 示例；只改队列 0 的私有 doorbell 偏移
+vio.private.q0.local_qid: 0                        # 示例；缺省 local_qid_base+N，外部流程须等于 N
+
+# -----------------------------------------------------------------------------
+# 14 VIO 运行期命令与参数（virtio_work：seq/vio_*_seq）
+# -----------------------------------------------------------------------------
+# 项目流程注册 vio_start、vio_tx、vio_rx_refill、vio_stop（vio_platform_pkg），另有无参的 load_params、vio_release；
+# rdma 组合顶层另有 dut_config。参数在命令执行时读取，vio.tx.* 每包重读，随机表达式逐包抽样。
+# 命令只接受 count=（vio_tx/vio_rx_refill，正整数，缺省 1）和 wait=；不支持 time=。失败时报 uvm_error VIO_SEQ。
+vio.target: h0.pf0.i0                              # 示例；vio_start/vio_stop 的目标 h<H>.pf<P>[.vf<V>].i<I>，只登记了一个目标时可省
+vio.tx.target: h0.pf0.i0                           # 示例；vio_tx 的目标，未给用 vio.target
+vio.tx.pair: 0                                     # 队列对下标（不是 raw qid），须小于活动队列对数
+vio.tx.kind: ETH_IPV4_TCP                          # 报文模板（net_packet 的 packet_template_e）
+vio.tx.len: 64                                     # 帧长，含各层协议头、不含 Virtio 头；14 ≤ len_min ≤ len_max ≤ 65535
+vio.tx.len_min: 64                                 # 随机长度下限，未给时等于 len
+vio.tx.len_max: 64                                 # 随机长度上限，未给时等于 len；每包在 [len_min, len_max] 均匀抽取
+vio.tx.gap_ns: 0                                   # 包间隔（ns）
+vio.tx.timeout_ns: 10000                           # 等 ring 空位的上限（ns，×vio.wait.multiplier），>0
+vio.tx.notify_batch: 1                             # 每次 Notify 前累计的包数，>0，每批抽样一次
+vio.tx.csum: 0                                     # 本包 checksum offload；csum/gso/mss 任一给出才带 offload 请求，显式 0 关闭
+vio.tx.gso: 0                                      # 本包 GSO/TSO，隐含 checksum
+vio.tx.mss: 1460                                   # GSO MSS
+vio.tx.desc_count: 3                               # 示例；每包描述符总数（含 header/TSO 槽），未给取格式最少值，显式 0 报错
+vio.tx.seg_mode: VIO_SEG_EQUAL                     # 多描述符切分：VIO_SEG_EQUAL / VIO_SEG_RANDOM
+vio.rx.target: h0.pf0.i0                           # 示例；vio_rx_refill 的目标，未给用 vio.target
+vio.rx.qid: 0                                      # 示例；无缺省：命令写 qid=N 或给此参数，须为已启用的偶数 RX 队列号（2i）
+vio.rx.count: 64                                   # 示例；命令未写 count= 时的补充数量
+# <命令>.<参数> 只是 Tcl 命令参数的记法，不是参数键（+vio_tx.count 无效）。vio_start、vio_stop、vio_release 无参数。
+vio_tx.count: 1                                    # Tcl：vio_tx count=100；正整数，缺省 1
+vio_rx_refill.qid: 0                               # 示例；Tcl：vio_rx_refill qid=0 count=64；未写时取 vio.rx.qid
+vio_rx_refill.count: 1                             # Tcl：count=64；未写时取 vio.rx.count，再缺省 1
+
+# 普通标准驱动（自测，examples/aip/virtio_aip_commands.sv）另注册 vio_init、vio_set_mq、vio_set_rss、vio_reset，
+# 以及独立发包流 vio_tx0/vio_tx1（参数路径 vio.tx0.*/vio.tx1.*）；它们与项目命令不能编进同一个工程，外部配置模式拒绝执行。
+vio.mq.target: h0.pf0.i0                           # 示例；vio_set_mq 的目标（仅标准驱动）
+vio.mq.pairs: 1                                    # vio_set_mq 的活动队列对数（仅标准驱动）
+vio.rss.target: h0.pf0.i0                          # 示例；vio_set_rss 的目标（仅标准驱动）
+vio.rss.hash_types: 0                              # RSS hash 类型（仅标准驱动）
+vio.rss.hash_key_size: 40                          # RSS key 字节数，1..255
+vio.rss.hash_key[0]: 0                             # 示例；key 第 0 字节
+vio.rss.table_size: 1                              # indirection 表大小，2 的幂，≤32768
+vio.rss.indirection_table[0]: 0                    # 示例；表项须小于活动队列对数
+
+# -----------------------------------------------------------------------------
+# 15 报文（net_packet：packet.load_params）
+# -----------------------------------------------------------------------------
+# net_packet 的键挂在调用方给的前缀下。VIO 的前缀是 vio.tx.hdr：每包先按 vio.tx.kind 建模板、按 vio.tx.len/len_min/len_max
+# 定 pkt_len，再加载 vio.tx.hdr.*；只改给出的键，未给的字段取下列缺省值（不随机化），表达式逐包重新抽样。下面用 vio.tx.hdr 举例。
+# 层路径：同一协议第一次出现为 outer_<协议>、之后为 inner_<协议>；本包只出现一次的协议可简写为 <协议>；层没有下标。
+# 来源 set_param > plusarg，同一来源内 完整路径 > 简写 > 叶名（裸字段名，如 +src_port 会改所有同名字段，慎用）。
+# 字段均为无符号，负数或超位宽直接 fatal；枚举取成员名、成员值或 rand。首段是协议层名、但本包没有该层或该层无此字段的键
+# 报 uvm_error NET_PACKET_PARAM 并忽略（vio_tx 的该包仍提交，之后停止并报错）；报文级键和非协议名的首段写错不检查。
+vio.tx.hdr.tmpl: ETH_IPV4_UDP                      # 示例；packet_template_e（键名不是 pkt_kind），可逗号候选或 rand，覆盖 vio.tx.kind
+vio.tx.hdr.pkt_rand_kind: PKT_CAT_TCP              # 示例；pkt_category_e，未给 tmpl 时按类别随机选模板
+# tmpl/pkt_rand_kind 给出时重建协议栈，本包此前加载的层字段与 VLAN 全部丢弃；tmpl 候选模板中出现的层名不报 NET_PACKET_PARAM。
+vio.tx.hdr.pkt_len: 512                            # 示例；整帧字节数（不含 FCS），覆盖 vio.tx.len 的抽样值，须容纳全部头尾
+vio.tx.hdr.outer_vlan_num: 1                       # 示例；第 1 个 Ethernet 后的 VLAN 标签数 0~4，给出即替换模板原有标签（0 删除）
+vio.tx.hdr.inner_vlan_num: 1                       # 示例；第 2 个（隧道内层）Ethernet 后的标签数，包内没有第 2 个 Ethernet 时非 0 即 fatal
+vio.tx.hdr.auto_csum: 1                            # 报文级：给出时先设所有层的 auto_csum，各层自己的 auto_csum 再覆盖
+vio.tx.hdr.force_mode: 0                           # 只影响 add_layer 的协议图检查，vio_tx 中无作用
+vio.tx.hdr.payload_mode: PAYLOAD_RANDOM            # PAYLOAD_RANDOM / FIXED / INCREMENT（字节序号 mod 256）/ PATTERN
+vio.tx.hdr.payload_fixed_val: 0x00                 # FIXED 模式的字节值
+vio.tx.hdr.payload_pattern: 0x5a,0xa5              # 示例；PATTERN 模式循环的字节，缺省空（全 0）；另可写 [i]、.size/.each、seq:a:b
+
+# L2。VLAN 标签数 ≥2 时除最后一个外都是 qinq 层（S-tag，路径 qinq/outer_qinq/inner_qinq），最后一个是 vlan 层。
+vio.tx.hdr.eth.dst_mac: 0x001122334455             # 示例；48 位，缺省 0
+vio.tx.hdr.eth.src_mac: 0x000102030405             # 示例；48 位，缺省 0
+vio.tx.hdr.eth.ethertype: 0x0800                   # 自动按下一层填写
+vio.tx.hdr.vlan.vlan_id: 1                         # 12 位 VID；ETH_VLAN_* 模板或 outer_vlan_num≥1 时才有此层
+vio.tx.hdr.vlan.pcp: 0                             # 3 位优先级
+vio.tx.hdr.vlan.dei: 0                             # 1 位
+vio.tx.hdr.vlan.ethertype: 0x0800                  # 自动按下一层填写
+vio.tx.hdr.qinq.vlan_id: 100                       # 示例；outer_vlan_num=2 时的外层 S-tag，字段同 vlan
+vio.tx.hdr.mpls.label: 0                           # ETH_MPLS_* 模板：20 位；另有 tc（3 位）、ttl（64），s_bit 自动
+
+# L3。标"自动"的字段在该层 auto_calc=1（缺省）时按实际报文重算，给定值只在 auto_calc=0 时生效（checksum 也可只用 auto_csum=0）。
+vio.tx.hdr.ipv4.src_addr: 0x0a000001               # 示例；32 位，缺省 0
+vio.tx.hdr.ipv4.dst_addr: 0x0a000002               # 示例；32 位，缺省 0
+vio.tx.hdr.ipv4.ttl: 64                            # 8 位
+vio.tx.hdr.ipv4.dscp: 0                            # 6 位
+vio.tx.hdr.ipv4.ecn: 0                             # 2 位
+vio.tx.hdr.ipv4.identification: 0                  # 16 位
+vio.tx.hdr.ipv4.flags: 0                           # 3 位：bit2 保留、bit1 DF、bit0 MF
+vio.tx.hdr.ipv4.fragment_offset: 0                 # 13 位，单位 8 字节
+vio.tx.hdr.ipv4.version: 4                         # 4 位，不自动
+vio.tx.hdr.ipv4.ihl: 5                             # 自动：5 + 选项字节/4
+vio.tx.hdr.ipv4.total_length: 20                   # 自动：IPv4 头加其后全部字节
+vio.tx.hdr.ipv4.protocol: 6                        # 自动按下一层（TCP 6、UDP 17、GRE 47）
+vio.tx.hdr.ipv4.header_checksum: 0                 # 自动（auto_calc 且 auto_csum）
+vio.tx.hdr.ipv4.opt_rr_en: 0                       # Record Route 选项；槽数 opt_rr_slots 缺省 9
+vio.tx.hdr.ipv4.opt_ts_en: 0                       # Timestamp 选项；槽数 opt_ts_slots 缺省 4
+vio.tx.hdr.ipv4.opt_lsr_en: 0                      # Loose Source Route；opt_lsr_count（≤4）、opt_lsr_addrs[0..3]
+vio.tx.hdr.ipv4.options: 0x01,0x01,0x01,0x00       # 示例；原始选项字节（须 4 字节对齐），任一 opt_*_en=1 时以生成结果为准
+vio.tx.hdr.ipv6.src_addr: "2001:db8::1"            # 示例；128 位，可写冒号文本或数值，缺省 0
+vio.tx.hdr.ipv6.dst_addr: "2001:db8::2"            # 示例；同上
+vio.tx.hdr.ipv6.hop_limit: 64                      # 8 位
+vio.tx.hdr.ipv6.traffic_class: 0                   # 8 位
+vio.tx.hdr.ipv6.flow_label: 0                      # 20 位
+vio.tx.hdr.ipv6.version: 6                         # 4 位，不自动
+vio.tx.hdr.ipv6.next_header: 6                     # 自动按下一层
+vio.tx.hdr.ipv6.payload_length: 0                  # 自动：其后全部字节
+vio.tx.hdr.arp.opcode: 1                           # ETH_ARP：1 请求、2 应答；另有 sender_mac/sender_ip/target_mac/target_ip（缺省 0）
+vio.tx.hdr.icmp.icmp_type: 8                       # ETH_IPV4_ICMP：8 为 Echo Request
+vio.tx.hdr.icmp.icmp_code: 0                       # 旧键 icmp.code 仍可用，两者都给时以 icmp_code 为准
+vio.tx.hdr.icmp.identifier: 0                      # 16 位；另有 sequence_num，checksum 自动
+vio.tx.hdr.icmpv6.icmp_type: 128                   # ETH_IPV6_ICMPV6：字段同 icmp，checksum 按伪首部自动
+
+# L4。dst_port 为 0 时按后续协议自动填知名端口：TCP 后接 NVMe-TCP 4420、iSCSI 3260、iWARP 5044；
+# UDP 后接 VXLAN 4789、GENEVE 6081、GTP-U 2152、RoCEv2 4791、VXLAN-GPE 4790。
+vio.tx.hdr.tcp.src_port: 1000                      # 示例；16 位，缺省 0
+vio.tx.hdr.tcp.dst_port: 2000                      # 示例；16 位，缺省 0
+vio.tx.hdr.tcp.seq_num: 0                          # 32 位
+vio.tx.hdr.tcp.ack_num: 0                          # 32 位
+vio.tx.hdr.tcp.flags: 0x018                        # 示例；9 位 NS/CWR/ECE/URG/ACK/PSH/RST/SYN/FIN，0x010 ACK、0x002 SYN，缺省 0
+vio.tx.hdr.tcp.window_size: 0xffff                 # 16 位
+vio.tx.hdr.tcp.urgent_ptr: 0                       # 16 位
+vio.tx.hdr.tcp.reserved: 0                         # 3 位
+vio.tx.hdr.tcp.data_offset: 5                      # 自动：5 + 选项字节/4
+vio.tx.hdr.tcp.opt_mss_en: 0                       # MSS 选项；opt_mss_val 缺省 1460
+vio.tx.hdr.tcp.opt_wscale_en: 0                    # Window Scale；opt_wscale_val 缺省 7
+vio.tx.hdr.tcp.opt_sack_perm_en: 0                 # SACK Permitted
+vio.tx.hdr.tcp.opt_ts_en: 0                        # Timestamps；opt_ts_val、opt_ts_ecr 缺省 0
+vio.tx.hdr.tcp.options: 0x01,0x01,0x01,0x00        # 示例；原始选项字节（须 4 字节对齐），任一 opt_*_en=1 时以生成结果为准
+vio.tx.hdr.udp.src_port: 1000                      # 示例；16 位，缺省 0
+vio.tx.hdr.udp.dst_port: 2000                      # 示例；16 位，缺省 0
+vio.tx.hdr.udp.length: 8                           # 自动：8 加其后全部字节
+vio.tx.hdr.udp.checksum: 0                         # 自动：伪首部 checksum；auto_csum=0 时保留（0 表示不校验）
+vio.tx.hdr.sctp.verification_tag: 0                # ETH_*_SCTP：32 位；另有 src_port/dst_port
+vio.tx.hdr.sctp.checksum: 0                        # 32 位 CRC32c 不计算，始终发送此值
+
+# 隧道：同一协议出现两次才分 outer_/inner_，只出现一次的层（包括内层）照样用简写，写成 inner_ 不生效且报 NET_PACKET_PARAM。
+# ETH_IPV4_UDP_VXLAN_ETH_IPV4_TCP：eth、ipv4 各两层用 outer_/inner_；udp、vxlan、tcp 各一层用简写（内层 TCP 即 tcp）。
+vio.tx.hdr.outer_eth.dst_mac: 0x001122334455       # 示例；外层 Ethernet
+vio.tx.hdr.inner_eth.dst_mac: 0x00aabbccddee       # 示例；内层 Ethernet
+vio.tx.hdr.outer_ipv4.dst_addr: 0x0a000002         # 示例；外层 IPv4
+vio.tx.hdr.inner_ipv4.dst_addr: 0xc0a80002         # 示例；内层 IPv4
+vio.tx.hdr.vxlan.vni: 100                          # 24 位；flags 自动为 0x08
+vio.tx.hdr.outer_tcp.dst_port: 443                 # 示例；内层 TCP 是全包唯一的 TCP：完整路径 outer_tcp、简写 tcp，不能写 inner_tcp
+# ..._VXLAN_ETH_IPV4_UDP 有两层 UDP，分别写 outer_udp/inner_udp；ETH_IPV6_UDP_VXLAN_ETH_IPV4_TCP 的内层 IPv4 写 ipv4。
+vio.tx.hdr.inner_udp.dst_port: 53                  # 示例；两层 UDP 时的内层
+vio.tx.hdr.geneve.vni: 100                         # GENEVE（层次同 VXLAN）：24 位；opt_en/opt_num（0~3）/opt_class0~2 生成 TLV
+# GRE L3（ETH_IPV4_GRE_IPV4_TCP）：outer_ipv4/inner_ipv4，eth、gre、tcp 用简写；NVGRE、ERSPAN 另有 outer_eth/inner_eth。
+vio.tx.hdr.gre.k_flag: 0                           # 置 1 才携带 key（32 位）；s_flag=1 时携带 sequence_number
+vio.tx.hdr.gre.key: 0                              # k_flag=1 时有效
+vio.tx.hdr.gre.c_flag: 0                           # 置 1 时携带 checksum，在内层校验和回填后按最终字节计算
+vio.tx.hdr.gtp.teid: 0                             # GTP-U（层名 gtp，内层无 Ethernet）：32 位；message_type 缺省 0xff
+vio.tx.hdr.vxlan_gpe.vni: 100                      # VXLAN-GPE：24 位；next_protocol 自动（1 IPv4、2 IPv6、3 Ethernet）
+vio.tx.hdr.erspan_ii.session_id: 0                 # ERSPAN（层名 erspan_ii/erspan_iii）：10 位
+vio.tx.hdr.esp.spi: 0                              # ESP：32 位；另有 sequence_number
+vio.tx.hdr.rocev2.opcode: RC_SEND_ONLY             # RoCEv2 BTH：rocev2_opcode_e（如 RC_RDMA_WRITE_ONLY、UD_SEND_ONLY）
+vio.tx.hdr.rocev2.dest_qp: 0                       # 24 位；另有 psn（24 位）、pkey（0xffff）及 RETH/AETH/DETH 字段
+vio.tx.hdr.rocev2.icrc_enable: 1                   # 带 4 字节 ICRC；payload 非 4 字节整倍时自动补 pad，vio_tx 因长度不等于 pkt_len 报错
+# 其余协议（iWARP、NVMe-TCP、iSCSI、NVMe-RDMA、PTP、IGMP、DHCP/DNS/BFD、LLDP/LACP/STP/MAC Control）的字段名
+# 即各协议类成员名，全集见 net_packet/src/protocols/<分类>/*.sv 中的 load_params。
+
+# checksum：各层 auto_calc（缺省 1）是该层全部派生字段的总开关；auto_csum（缺省 1）只停本层 checksum/ICRC，
+# 长度、协议号等照常重算，外层 checksum 按保留后的字节计算；显式的层级 auto_csum 优先于报文级 vio.tx.hdr.auto_csum。
+# auto_csum 管：ipv4.header_checksum、tcp/udp/icmpv6 伪首部 checksum、icmp/igmp checksum、gre checksum（c_flag=1）、
+# rocev2 ICRC；sctp 的 CRC32c 与 iwarp 的 mpa_crc 从不计算。
+vio.tx.hdr.tcp.auto_calc: 1                        # 0：本层长度、偏移、选项、checksum 等全部用给定值
+vio.tx.hdr.tcp.auto_csum: 0                        # 示例；只保留下一行给定的 TCP checksum
+vio.tx.hdr.tcp.checksum: 0x1234                    # 示例；auto_csum=0 时发送此值，否则按伪首部自动计算（缺省 0）
+vio.tx.hdr.inner_udp.auto_csum: 0                  # 示例；隧道中只影响内层 UDP
+# vio.tx.csum/gso=1 时 VIP 在发送副本中把 L4 checksum 改写为伪首部种子（只支持单层 IPv4/IPv6 的 TCP/UDP）；
+# Function 绑定了报文 checker 时，VIP 用 payload 末 20 字节写 trace 并重新组包，注入的长度、checksum 会被重算。
+
+# -----------------------------------------------------------------------------
+# 16 RDMA（rdma_work）
+# -----------------------------------------------------------------------------
+# 开关、运行模式与读取时机
+# 读取时机：build 读取（独立模型的 src_addr.* 在 rdma_init 读，rxe_reply_ms 在 rxe 启动时读）；Tcl load_params 只在
+#   rdma_init 之前可用（之后连同 VIO 整个事务被拒），重读 env/wait/qp/mem/pkt/traffic，提交后须重新 dut_config；
+#   rdma_run 不重读参数（新建 QP 取当时的场景值）；traffic 表达式与 op(mix)/dir/signaled_pct 每条 WR 抽样。
+rdma.enabled: 0                                    # 组合顶层 RDMA 总开关；预先给出 rdma_cfg.functions/grants 时自动开启；只在 build 读一次
+rdma.env.mode: DUT                                 # PEER/RXE/DUT（不分大小写）；独立模型缺省 PEER，DPU 项目缺省 DUT；build 后不可改
+rdma.env.link_type: rdma_link                      # 独立模型链路：rdma_link/rdma_link_netpkt/rdma_dut_link（需 dut_endpoint）；build 后不可改
+rdma.env.vseq: rdma_traffic_vseq                   # DPU 项目只影响 dut_config 的 EAT 项（srq/qp_lifecycle/errors/reliability/random_vseq）；独立模型由 test 给初值并按名创建；build 后不可改
+rdma.env.checker_enable: 1                         # 协议检查器；build 后不可改
+rdma.env.cov_enable: 1                             # 覆盖率收集；build 后不可改
+rdma.env.poll_ns: 10                               # monitor 与等待循环的轮询间隔，>0
+rdma.env.response_timeout_us: 100                  # 完成等待基准，>0：signaled WR 最多等 4 倍；TX-only 收帧截止；rdma_rx_wait 缺省
+
+# DPU 资源授权、路由与源地址（只在自动生成 grant 时于 build 采样，显式 rdma_cfg.grants 不读）
+# 逐 Function 覆盖：rdma.<键> → rdma.hH.<键> → rdma.hH.pfP.<键>；VF 为 rdma.hH.pfP.vfV.<键>（不继承 PF 层），后者覆盖前者。
+#   build 后 load_params 改 route 被拒；改 resource/src_addr 不生效（保持 build 值）。
+rdma.resource.qp_count: 64                         # QP 容量，含保留 QPN 0/1，≥3
+rdma.resource.cq_count: 64                         # CQ 容量，>0
+rdma.resource.mr_count: 64                         # MR 容量，>0
+rdma.resource.pbl_count: 1024                      # PBL 容量，>0
+rdma.resource.pd_count: 16                         # PD 容量，>0
+rdma.resource.srq_count: 16                        # SRQ 容量
+rdma.resource.ceq_count: 1                         # CEQ 数，≥1；每 Function 占 1+ceq_count 个 MSI-X 向量（本地向量 ≤64）
+rdma.h0.pf0.resource.qp_count: 128                 # 示例：只放大 h0.pf0 的 QP 容量
+rdma.route.dst_port: 15                            # QPC DST_PORT，0..15，15=驱动 NODE_MODE；RC/URC 的 QSCH dport 跟随它，UD 固定 15
+rdma.route.dst_vport_id: 0                         # 示例；缺省取本 Function 的 dpu.hH.pfP[.vfV].vport，0..2047
+rdma.route.fwd: 0                                  # 0=驱动缺省（RC/URC→CPU，UD→NORMAL），1=NORMAL，3=CPU
+rdma.h0.pf0.route.dst_port: 9                      # 示例：对端在同 DPU 的 Host1（rdma_work README：8+Host 号）
+rdma.h0.pf0.vf0.route.dst_vport_id: 37             # 示例：VF 级覆盖（README：跨 Host 填对端 global Function ID）
+rdma.src_addr.alloc: random                        # 源地址表（全部 Function 共 1024 项）选空闲项：random（随种子）或 seq（最小空闲）
+rdma.h0.pf0.src_addr.idx: 1023                     # 示例：钉住该 Function 的首项，0..1023，冲突报错；写在全局层会让多个 Function 冲突
+# RDMA 相关的 dpu.qsch.rdma_vfs/dbq_pages/vports 与 dpu.*.msix 模板见第 5、6 节。
+
+# EQ MSI-X（只在 build 读取；load_params 会重读但不提交）
+rdma.msix: 0                                       # 1=rdma_init 为 CEQ/AEQ 登记 MSI-X 接收，并核对每个已消费的 EQE 都有中断
+rdma.msix_per_msg: 1                               # 1=每个 EQE 一个中断；DUT 合并中断时设 0（每批一个）
+rdma.msix_grace_ns: 2000                           # 中断晚到上限（ns）
+rdma.msix_drop_at: -1                              # 仅模型：丢第 N 个中断做负向测试，-1 关闭
+# DPU 项目的 EQ 消息地址/数据取 dpu.*.msix 模板（无模板则轮询）；load_params 时按新模板刷新，向量号随 grant 不变。
+
+# 等待策略（仿真时间 ns；实际超时 = 基准 × multiplier）
+rdma.wait.poll_ns: 10                              # CMQ 等待轮询间隔，1..2^32-1
+rdma.wait.timeout_ns: 100000                       # CMQ 完成与 RTS→SQD 等待超时，1..2^32-1
+rdma.wait.multiplier: 1                            # 倍率：作用于 timeout_ns、ready_ns 与流量排空上限，1..2^32-1
+rdma.wait.max_polls: 1000000                       # 防挂死轮询上限；须 max_polls×poll_ns ≥ timeout_ns×multiplier
+rdma.wait.ready_ns: 10000000                       # 序列等 env ready 与 rdma_dut_link 启动的上限，>0
+rdma.wait.rxe_reply_ms: 10000                      # 仅 rxe：rxe_peer 每条命令的应答上限（真实 ms），1..2^31-1，不乘倍率
+
+# RDMA 场景：QP（全局，不分 Function；每次 rdma_run 新建 QP 时取值）
+rdma.qp.type: RC                                   # RC/UD/URC；UD 只支持 send/send_imm，URC 只支持 send/write/write_imm 且 rxe 远端不支持；也决定 dut_config 写哪张 EAT 表
+rdma.qp.depth: 256                                 # SQ/RQ/CQ 深度请求，1..32768（驱动取 2 的幂，RC/UD ≥256，URC ≥8）
+rdma.qp.mtu: 1024                                  # 256/512/1024/2048/4096
+rdma.qp.max_sge: 4                                 # 每 WR 最大 SGE，1..4
+rdma.qp.psn: 0                                     # 起始 PSN（本端 SQ 与对端 RQ），≤0xffffff；RX-only 作 RTR rq_psn
+rdma.qp.dest_qpn: 0                                # rdma_run tx_only/rx_only 的 dest_qpn 缺省，≤0xffffff
+rdma.qp.qkey: 0x80010000                           # UD Q_Key，也是 rdma_run dest_qkey 缺省；rxe 插件改为 0x12345678
+rdma.qp.timeout: 14                                # ACK 超时编码 0..31，0=不超时（rxe 插件强制 0）
+rdma.qp.retry: 7                                   # 重传次数，0..7
+rdma.qp.rnr_retry: 7                               # RNR 重试次数，0..7
+rdma.qp.min_rnr: 1                                 # RNR NAK 定时器编码，0..31
+
+# RDMA 场景：内存（每个业务端点一块缓冲与 MR；本端槽在前半，远端/接收槽在后半）
+rdma.mem.buf_bytes: 0x20000                        # 每端缓冲字节数，须 ≥ mr_offset + 2×slots×slot_bytes
+rdma.mem.slot_bytes: 0x1000                        # 单条消息槽字节数（len 上限）；UD 须 >40（GRH）
+rdma.mem.slots: 8                                  # 槽数，>0；TX/RX-only 时 count 不能超过它
+rdma.mem.mr_offset: 0                              # MR 在缓冲内的偏移；cas/faa 须 8 字节对齐
+rdma.mem.mr_remote_read: 1                         # 远端读权限，read 需要
+rdma.mem.mr_remote_write: 1                        # 远端写权限，write/write_imm 需要
+rdma.mem.mr_remote_atomic: 1                       # 远端原子权限，cas/faa 需要（且 slot_bytes 为 8 的倍数）
+
+# RDMA 场景：报文属性（0=链路/驱动缺省；IPv4 可写点分或数值）
+# 独立模型只有 rdma.env.link_type=rdma_link_netpkt 接受非 0 值（否则 build 拒绝）；DPU 项目写入 QPC 与源地址表。
+rdma.pkt.src_mac: 0x020000000001                   # 示例，缺省 0；DPU 必填：DUT 自己的 MAC，rdma_init 写入源地址表
+rdma.pkt.src_ip: 10.0.0.1                          # 示例，缺省 0；DPU 必填：DUT 自己的 IPv4
+rdma.pkt.dst_mac: 0                                # 双端时非 0 即作 RTR DMAC（0 用对端 env MAC）；rdma_run dmac 缺省
+rdma.pkt.dst_ip: 0                                 # 对端 IPv4；DPU 写入 QPC 目的 GID（::ffff:a.b.c.d）
+rdma.pkt.vlan_en: 0                                # VLAN 开关
+rdma.pkt.vlan_id: 0                                # VLAN ID，0..4095
+rdma.pkt.udp_sport: 0                              # UDP 源端口，0..65535
+
+# RDMA 场景：流量
+rdma.traffic.op: send                              # send/send_imm/write/write_imm/read/cas/faa，或 mix（按 w_* 逐条抽）
+rdma.traffic.count: 32                             # 业务 WR 数，>0；TX/RX-only ≤mem.slots，TX-only RC 还须 ≤qps，RX-only 还须 ≤qp.depth
+rdma.traffic.w_send: 1                             # mix 权重，0 禁用；七项之和 1..0xffffffff
+rdma.traffic.w_send_imm: 1                         # mix 权重
+rdma.traffic.w_write: 1                            # mix 权重
+rdma.traffic.w_write_imm: 1                        # mix 权重
+rdma.traffic.w_read: 1                             # mix 权重
+rdma.traffic.w_cas: 1                              # mix 权重；cas/faa 可能出现时 dut_config 追加原子 EAT 项
+rdma.traffic.w_faa: 1                              # mix 权重
+rdma.traffic.signaled_pct: 100                     # signaled 比例，0..100；TX-only 全部 signaled
+rdma.traffic.dir: 2                                # 0=f0 发起，1=f1 发起，2=逐条随机；TX-only 固定 f0
+# 下面六项保留原文、每条 WR 求值；数值采样超出范围直接 UVM_FATAL（不裁剪、不重抽）。
+rdma.traffic.len: "[1:4096]"                       # 字节，上限 slot_bytes；UD 为 min(mtu,slot_bytes-40)，TX/RX-only 另限 mtu（这两类用缺省值会越界）；原子固定 8
+rdma.traffic.sge: 1                                # SGE 数，1..min(max_sge,len)；原子与 rxe 远端发起时固定 1
+rdma.traffic.data_mode: RANDOM,FIXED,INCREMENT,PATTERN # 逐条等概率选一（无权重）；RX-only 不能选到 RANDOM
+rdma.traffic.data_fixed: 0                         # FIXED 时的负载字节，0..255
+rdma.traffic.data_pattern: "{0}"                   # PATTERN 的字节序列 {e0,e1,...}，每项 0..255，每项可写表达式
+rdma.traffic.imm: ""                               # SEND_IMM/WRITE_IMM 立即数，0..0xffffffff；空=每条随机
+# 表达式：64、0x40、[1:4096]（闭区间）、64,128,256 或 [64,128,256]（等概率候选，可嵌套区间）、
+#   {[1:256]:/30,[257:4096]:/70} 或 {64:=1,128:=3}（权重）、inc:64:512:64（等差候选）；rand 为 64 位全宽，几乎必越界，勿用。
+#   含 {}[]:, 的命令行值整体加引号：'+rdma.traffic.len={[1:256]:/30,[257:4096]:/70}'；count/w_*/op 等普通键读取时只抽一次。
+
+# RDMA Tcl 命令（rdma.enabled=1 时注册；rdma_aip_cmd.sv 即将改写，以下为当前参数）
+# 顺序：[set_param → load_params] → dut_config → rdma_init → rdma_run…；rdma_init 无参数，须在成功的 dut_config 之后，
+#   每个 epoch 只能尝试一次（失败也不能重试），尝试后 load_params、dut_config 均被拒。rdma_stop 无参数，只取消运行中的
+#   rdma_run（空闲也成功），不销毁资源。各命令都可加 wait=0 后台执行（AIP 通用）。
+# <命令>.<参数> 只是记法，不是参数键；参数取无符号整数字面量（十进制或 0x），不支持随机语法。
+rdma_run.f0: 0                                     # 示例；发起端（TX-only 为发送端、RX-only 为接收端）global Function ID，0..255，必填（group 除外）
+rdma_run.f1: 1                                     # 示例；双端模式的对端 global ID，0..255 且 ≠f0；tx_only/rx_only 时不读
+rdma_run.qps: 1                                    # 本次新建 QP 对数，≥1；rx_only 须为 1
+rdma_run.tx_only: 0                                # 1=只建发送端并核对首发完整帧；只支持 RC/UD 的 send/send_imm（违例为 UVM_FATAL）
+rdma_run.rx_only: 0                                # 1=只建接收端、预投 count 个 RECV，返回发包字段，再 rdma_rx_wait；与 tx_only 互斥
+rdma_run.dest_qpn: 0x12345                         # 示例；对端 QPN，缺省 rdma.qp.dest_qpn；tx/rx_only 须 1..0xffffff
+rdma_run.dest_qkey: 0x80010000                     # UD 对端 Q_Key，缺省 rdma.qp.qkey，≤0xffffffff
+rdma_run.dmac: 0x001122334455                      # 示例；对端 MAC（别名 dst_mac），缺省 rdma.pkt.dst_mac；tx/rx_only 须非 0
+rdma_run.group: 0                                  # 示例；取 SV 声明的 cfg.flow_groups[N] 的 f0/f1/qps，不能与其他参数同用
+rdma_rx_wait.timeout_us: 100                       # 等 rx_only 登记的入站报文全部完成，缺省 rdma.env.response_timeout_us，>0
+
+# Soft-RoCE（rxe）与独立模型序列的原始 plusarg（+NAME=value，不经 aip_core，set_param 无效）
+RXE_PEER: /path/to/rxe_peer                        # 示例；rxe_peer 进程路径，必填
+RXE_DEV: rxe_rtap0                                 # rxe 设备名
+RXE_GID: 1                                         # GID 下标
+RXE_TAP: rtap0                                     # TAP 网卡名（tools/rxe/rxe_tap_setup.sh up 创建）
+RXE_WAIT_US: 20                                    # 链路空闲时每步等待的真实时间（us）
+RXE_SIM_MAC: "02:00:00:00:79:01"                   # 仿真侧 MAC
+RXE_SIM_IP: 10.79.0.1                              # 仿真侧 IPv4
+RXE_IP: 10.79.0.2                                  # rxe 侧 IPv4
+RDMA_RANDOM_COUNT: 200                             # 独立模型 rdma_random_vseq 的随机 verb 数
+# rxe 插件 pre_build 强制 mode=RXE、link_type=rdma_link_rxe、qp.timeout=0、qp.qkey=0x12345678（覆盖命令行值）。
+# 仅测试用：+RDMA_LINK/+RDMA_VSEQ（独立 env test 的 link/vseq 初值）、+EXPECT_DEPTH/+EXPECT_DRAWS（场景测试断言）、
+#   +RXE_CASES（rxe 用例数）、+RDMA_TEST_INIT、+grant_expect_qp[=N]（组合回归 fixture）。
+# 已删除：rdma[.hH[.pfP[.vfV]]].resource.eth_port 出现即 build 报错（QSCH dport 跟随 route.dst_port，UD 为 15）；
+#   旧 rdma.biz.* 与 rdma.env 下的旧 QP 参数已删除但不报错（静默忽略）。
+
+# -----------------------------------------------------------------------------
+# 17 组合顶层（rdma_work integration/project 的 dpu_top_env）
+# -----------------------------------------------------------------------------
+top.ready_timeout_ns: 100000                       # 等全部 R-Tile 端口出复位的上限（ns）
+top.timeout_ns: 10000000                           # 整体仿真时间上限（ns，uvm_root::set_timeout）
+top.cmd_watchdog_ns: 50000                         # 单条 Tcl 命令连续无活动的停滞上限（ns），0 关闭；真实 DUT 上的 rdma_init 需调大
+AIP_TCL: 1                                         # 原始开关，只看是否出现：+AIP_TCL 进入 Tcl bridge（脚本经 -ucli -do），否则缺省只做 dut_config
+# Tcl：dut_config（VIO+RDMA 共用的 DPU 配置）、load_params（DPU/VIO/RDMA 参数原子重载，不写 DUT）、vio_release，均无参数。
+# 组合顶层缺省：RDMA 关闭（example test 改为开启）、vio.pairs=0、VIO 为 REAL_DUT 外部配置、RDMA mode=DUT、vseq=rdma_traffic_vseq。
+
+# -----------------------------------------------------------------------------
+# 18 ETH 分段 agent（eth_seg_agent）
+# -----------------------------------------------------------------------------
+# 前缀 = agent 全名：bind wrapper 为 AGENT_NAME（如 eth0；留空取 HDL 层次 %m，非字母数字转 _）；
+# eth_seg_env 内为 <env 全名>.client_agent / .mac_agent。agent build 开头 cfg.load_params(全名) 读一次后 validate，
+# 不合法即 fatal；除 loopback 外运行中不再读取。Tcl bridge 在 run 阶段才工作，这些字段用 plusarg 给出。
+# 裸叶名（如 +include_fcs=1）作用于所有 agent。只能在代码中设置：cfg.vif、RATE/AGENT_NAME（wrapper 参数）、
+# eth_seg_env.enable_scoreboard/enable_coverage、sequence 字段。非测试代码没有 raw plusarg。
+eth0.eth_rate_g: 100                               # 缺省=编译期 RATE；须等于 RATE（100/200/400），只作校验
+eth0.role: ETH_SEG_CLIENT                          # ETH_SEG_CLIENT 驱动 TX；ETH_SEG_MAC 驱动 RX 和 TX ready
+eth0.is_active: UVM_ACTIVE                         # UVM_ACTIVE 或 UVM_PASSIVE（只监视/采样，不能发包）
+eth0.preamble_passthrough: 0                       # 接口字节流带 7×55+D5 前导（事务从 DA 起，不含前导）
+eth0.include_fcs: 0                                # 接口带 4B FCS：缺 FCS 时 codec 补 CRC32，TX 置 skip_crc
+eth0.enable_protocol_check: 1                      # 协议 checker 开关，仅 bind wrapper 流程有效
+eth0.ready_pattern: ETH_SEG_CONTINUOUS             # MAC 的 TX ready：CONTINUOUS/PERIODIC/RANDOM
+eth0.ready_high_cycles: 8                          # PERIODIC ready 高电平拍数，>0
+eth0.ready_low_cycles: 2                           # PERIODIC ready 低电平拍数，>0
+eth0.ready_high_pct: 70                            # RANDOM 时每拍 ready=1 的概率 %，0..100
+eth0.rx_valid_pattern: ETH_SEG_CONTINUOUS          # MAC 的 RX valid：CONTINUOUS/PERIODIC/RANDOM
+eth0.rx_valid_high_cycles: 8                       # PERIODIC valid 高电平拍数，>0
+eth0.rx_valid_low_cycles: 2                        # PERIODIC valid 低电平拍数，>0
+eth0.rx_valid_high_pct: 70                         # RANDOM 时每拍 valid=1 的概率 %，0..100
+eth0.traffic_load_pct: 100                         # 固定负载 %，1..100，按帧段数折算包后 idle 段；线速命令要求 100
+eth0.random_load: 0                                # 1=每帧在 load_min_pct..load_max_pct 间随机抽负载；线速命令要求 0
+eth0.load_min_pct: 10                              # 随机负载下限 %，1..100，≤ load_max_pct
+eth0.load_max_pct: 100                             # 随机负载上限 %，1..100
+eth0.max_pending: 64                               # >0；driver 预取深度（满则反压 sequence），兼 loopback 队列上限
+eth0.loopback: 0                                   # TX→RX 原样回环，仅 MAC+ACTIVE；每帧 TX EOP 重读，可 set_param 中途开关
+# loopback 未给出（含 clear_param 后）保持当前值；队列满报 ETH_LOOPBACK_OVERFLOW 并丢该帧，去 FCS 后 <9B 不回环。
+
+# AIP 发包命令（示例包 eth_seg_aip_pkg / eth_net_packet_aip_pkg，宏映射 eth0..eth3，按 AGENT_NAME 增删）：
+#   <agent>_send / <agent>_net_send count=N（缺省 1，须 ≥1）或 time=T（到期 kill）。
+#   <agent>_net_send 另收 rate_gbps=（缺省端口速率，≤端口速率）clk_freq_hz=415039062.5 ifg_bytes=12（12..1000000）
+#   mode=fixed|random_rate、rate_min_gbps= rate_max_gbps=（random_rate 必填，0<min≤max≤速率）、
+#   psn_step=0（≤0xffffff，RoCEv2 PSN 逐包递增）va_step=0（RETH VA 逐包递增）。以下键每包重读，不改 agent cfg。
+eth0.frame_length: 256                             # <agent>_send 的帧长（字节），9..16384
+eth0.payload_byte: 0xa5                            # <agent>_net_send 固定负载字节；给出 payload_mode 时不读
+# <agent>_net_send 以 agent 全名为 net_packet 前缀（packet.load_params("eth0")），协议头键直接挂在 eth0. 下：
+eth0.tmpl: ETH_IPV4_UDP                            # 报文模板，未给时命令按 ETH_IPV4_UDP
+eth0.pkt_len: 256                                  # 不含前导/FCS，14..16384 且须容纳协议栈
+eth0.outer_eth.dst_mac: 0x123456789abc             # 示例；层名 outer_/inner_<协议>，只出现一次可简写 eth0.eth.*
+eth0.outer_udp.dst_port: 4791                      # 示例；其余 hdr 字段见第 15 节
+
+# -----------------------------------------------------------------------------
+# 19 DPU 控制队列（dpu_queue_work：cmdq / mbx / tlpq / msgq）
+# -----------------------------------------------------------------------------
+# 前缀即 <q>_cfg.prefix，四个 env 各读自己的前缀（无字面 dpuq.* 公共键）；参数只在 build 时读一次，运行期 set_param 不生效。
+# 请写全路径：裸叶名（+entries=、+msix=、+func=）会命中多个前缀；字符串键的逗号值按 AIP 规则随机取一个候选。
+# 公共键每个前缀都有、缺省相同，下面以 cmdq 为例（mbx./tlpq./msgq. 的 enabled/num_ops/wait.* 同义）。
+cmdq.enabled: 1                                    # 集成顶层据此决定是否创建该 env；env 自身不检查
+cmdq.num_ops: 64                                   # <q>_run 未给 n= 时的操作数，自测 rand/reset 也用
+cmdq.wait.poll_ns: 100                             # Host 内存/后台消费轮询间隔，ns，1..2^32-1；寄存器轮询固定 1 us
+cmdq.wait.timeout_ns: 1000000                      # 每个等待的上限（完成/ACK/复位应答/drain），ns
+cmdq.wait.multiplier: 1                            # 全部超时倍率，1..2^32-1
+cmdq.wait.max_polls: 1000000                       # 单次等待轮询次数上限，1..2^32-1
+# CMDQ：控制寄存器在 AF BAR0 0x8040 起，门铃在 cmdq.func 的 BAR0+0x1000。
+cmdq.func: h0.pf0                                  # 下发命令的 Function，hH.pfP[.vfV]，须在 DPU 拓扑内
+cmdq.entries: 32                                   # 描述符环深度，2..1024 的 2 的幂
+cmdq.cmd_length: 128                               # FSE 命令头 cmd_length，1..256；ETH 驱动 128，EMP 124
+cmdq.w_create: 4                                   # CREATE 权重；流数达 max_flows 后不选
+cmdq.w_search: 3                                   # SEARCH 权重
+cmdq.w_delete: 3                                   # DELETE 权重
+cmdq.w_pstat: 1                                    # PSTAT 计数查询权重；五个 w_* 不能全为 0
+cmdq.w_neg: 0                                      # 负向操作权重，只要求返回码非 0
+cmdq.max_flows: 16                                 # 参考流表最大流数，1..flow_id_max+1
+cmdq.flow_id_max: 1023                             # flow_id 随机上限，<0x4000（14 位）
+cmdq.pstat_table: 1                                # PSTAT table_sel，0..15，1=TABLE_SEL_FLOW0
+# Mailbox：每个 Function 的 BAR2 一对环；MBL map 在 AF BAR0 0x190000。
+mbx.entries: 64                                    # TX/RX 环深度，2..1024 的 2 的幂
+mbx.max_funcs: 0                                   # 参与的 Function 数（含 AF），0=拓扑内全部
+mbx.max_len: 448                                   # 请求最大字节，0..448（512B 缓冲减 64B 描述符）
+mbx.w_inline: 1                                    # 内嵌长度 0..44B 的权重
+mbx.w_buf: 1                                       # 外部缓冲长度 45..max_len 的权重；不能与 w_inline 同为 0
+mbx.notify_ratio: 25                               # AF 每回一条 ACK 后追加主动通知的概率，0..100（%）
+mbx.max_type: 63                                   # 请求 msg_type 取 1..max_type，1..65535（0 为 ACK）
+mbx.af_dstid: af                                   # 请求目的 ID：af=AF 的 srcid，ffff=0xFFFF 交硬件送 AF
+mbx.bdf_mode: switch                               # BAR2 BDF/MBL map 编码：switch=Requester ID，ep=func/vfunc 号
+mbx.map_table: 1                                   # env 为参与的 Function 编程 MBL map；平台已编程时置 0
+mbx.map_1k: 1                                      # 1=1K PF/VF 模式（索引=srcid），0=512 模式压缩
+mbx.msix: 0                                        # 1=RX 须有 mailbox MSI-X 相伴（向量写入 MBL map），须 map_table=1
+mbx.msix_grace_ns: 2000                            # 见到新消息后再等中断的上限，ns
+mbx.msix_per_msg: 1                                # 1=每条消息一个中断，丢一个即报错；0=DUT 合并时每批一个
+# TLPQ：env 扮演 EMP；host/switch RX 队列在 AF BAR0 0x18100/0x18200。
+tlpq.entries: 32                                   # RX 环深度，2..1024 的 2 的幂
+tlpq.queues: host                                  # 启用的 RX 队列：host、switch 或 both
+tlpq.bdf_mode: ep                                  # 队列 BDF 字段：ep=AF 的 func 号，switch=AF 完整 BDF
+tlpq.target_bdf: 0x0100                            # Host 侧 Cfg/VDM 请求的目标 BDF（EMP 模拟的 Function），≤0xffff
+tlpq.w_cfgrd: 4                                    # CfgRd 权重
+tlpq.w_cfgwr: 4                                    # CfgWr 权重
+tlpq.w_mrd: 0                                      # MRd 权重；工作模式 1/3 才进 TLPQ，模型自测缺省 1
+tlpq.w_vdm: 2                                      # VDM 权重；四个 w_* 不能全为 0
+tlpq.vdm_max_dw: 16                                # VDM 数据 DW 上限，1..28
+tlpq.vdm_route: 2                                  # VDM 路由：0=到 RC，2=按 ID，3=广播
+tlpq.vdm_vendor: 0x1ab4                            # VDM Vendor ID，≤0xffff
+tlpq.mrd_base: 0x0000004000000000                  # MRd 激励地址起点，须 4GB 以上且 DWORD 对齐
+tlpq.parallel: 4                                   # 并发 Host 请求线程数，1..64
+tlpq.work_mode: -1                                 # 写 0x80090+4*host 工作模式 0..3，-1=不写；0=Memory 读写外全送 AF，3=全部
+tlpq.check_desc_type: 0                            # 1=检查 RX 描述符 type 等于 TLP type[3:0]（语义待确认），模型自测缺省 1
+# MSGQ：主机侧消费者；7 类子队列控制结构在 AF BAR0 0x10040 起，每类 0x40。
+msgq.func: h0.pf0                                  # 写 HID/FID、收门铃的消费 Function，须在拓扑内；msix=1 时须为 AF
+msgq.types: tstamp,age                             # 启用子队列 fse/age/tstamp/notify/iacl/eacl/vdpa（小写不重复）；命令行逗号值只随机取一个
+msgq.ptr_src: mem                                  # 写指针来源：mem=硬件写回的 seq_id，reg=读 curr_ptr 寄存器
+msgq.credit: update                                # update=消费后回写 tail，init=同驱动只在配置时写 tail=entries-1
+msgq.check_credit: 1                               # 硬件写入 tail 保留的那一项即报错；覆盖模式 DUT 配 credit=init 时置 0
+msgq.gap_ns: 200                                   # msgq_run 两次触发间隔上限（0..gap_ns 随机），ns
+msgq.reg_poll_ns: 1000                             # ptr_src=reg 时的轮询间隔（每次一个 PCIe 读），ns，>0
+msgq.msix: 0                                       # 1=AGE/TSTAMP 用 AF 的 MAC age/PTP stamp MSI-X，其余子队列仍轮询
+msgq.msix_grace_ns: 2000                           # 见到新条目后再等中断的上限，ns
+msgq.msix_per_msg: 1                               # 1=每条一个中断，丢一个即报错；0=DUT 合并时每批一个
+msgq.mode: 0                                       # 示例；给出时作为各子队列 mode 的缺省值，不给用驱动缺省（age 1，其余 0）
+# msgq.<type>.*：只读 msgq.types 启用的类型；entries 为 2..4096 的 2 的幂，entry_bytes 为 4..128 的 2 的幂。
+msgq.fse.entries: 64                               # FSE 深度
+msgq.fse.entry_bytes: 64                           # FSE 条目字节
+msgq.fse.mode: 0                                   # FSE mode，0..7
+msgq.age.entries: 128                              # AGE 深度
+msgq.age.entry_bytes: 32                           # AGE 条目字节
+msgq.age.mode: 1                                   # AGE mode，0..1
+msgq.tstamp.entries: 128                           # TSTAMP 深度
+msgq.tstamp.entry_bytes: 8                         # TSTAMP 条目字节
+msgq.tstamp.mode: 0                                # 无 mode 字段，只能为 0（msgq.mode 非 0 时须显式给 0）
+msgq.notify.entries: 64                            # NOTIFY 深度（驱动无依据）
+msgq.notify.entry_bytes: 8                         # NOTIFY 条目字节（假设值）
+msgq.notify.mode: 0                                # 无 mode 字段，只能为 0
+msgq.iacl.entries: 64                              # IACL 深度
+msgq.iacl.entry_bytes: 64                          # IACL 条目字节
+msgq.iacl.mode: 0                                  # IACL mode，0..7
+msgq.eacl.entries: 64                              # EACL 深度
+msgq.eacl.entry_bytes: 64                          # EACL 条目字节
+msgq.eacl.mode: 0                                  # EACL mode，0..7
+msgq.vdpa.entries: 64                              # VDPA 深度
+msgq.vdpa.entry_bytes: 8                           # VDPA 条目字节
+msgq.vdpa.mode: 0                                  # VDPA mode，0..7
+# 仅模型模式自测（tests/）读取；带"负向"的用于证明检查会报错，期望 test 失败。
+dpuq.timeout_us: 50000                             # 自测整个 test 的时间上限，us
+cmdq.model.corrupt_at: -1                          # 负向：第 N 条应答回显错误 cmd_sn（从 0 计），-1 关闭
+mbx.model.drop_at: -1                              # 负向：丢弃第 N 条转发的消息，-1 关闭
+mbx.model.corrupt_at: -1                           # 负向：篡改第 N 条消息的 srcid，-1 关闭
+mbx.model.drop_irq_at: -1                          # 负向：第 N 次 mailbox MSI-X 不发，-1 关闭
+mbx.model.srcid_xor: 0                             # 非 AF Function 的硬件 srcid = 推算值 ^ srcid_xor（低 10 位）
+tlpq_model.corrupt_cpl: 0                          # 负向：翻转 CplD 数据位 0
+tlpq_model.drop_vdm: 0                             # 负向：吞掉 VDM
+msgq_model.corrupt_every: 0                        # 负向：每 N 条篡改一个被比较字节，0 关闭
+msgq_model.ignore_credit: 0                        # 负向：无视信用继续写，配合 msgq_credit_test 与 credit=init
+msgq_model.drop_irq_at: -1                         # 负向：第 N 次 MSI-X 不发，-1 关闭
+# AIP 命令（集成方调 env.register_aip_commands() 后注册，组名=前缀，重名 fatal；模型自测不注册）：
+#   <q>_run [n=N]：未启动先 start_queue，再做 N 次随机操作（cmdq 命令、mbx 请求、tlpq Host 请求、msgq 触发消息；
+#     mbx/tlpq/msgq 结束时 drain）；N 缺省 <q>.num_ops，无符号 ≤0xffffffff；返回 "OK: <q>_run n=N ops=.. errors=.."（累计）。
+#     msgq_run 须已绑定 msgq_trigger，DUT 上由集成方提供，否则返回 ERROR。
+#   <q>_reset：软复位，按驱动流程关队列→复位→复用原内存重配，队列外 DUT 状态保留；mbx 丢弃在途消息。
+#   <q>_stop：关队列并释放环与缓冲。三条命令都接受框架的 wait=0|1（缺省 1），除 n= 外不读参数，不改 cfg。
+
+# -----------------------------------------------------------------------------
+# 20 其他启动开关与无参数项目
+# -----------------------------------------------------------------------------
+# virtio 旧版 plusarg（virtio_net_env_config::apply_plusargs）
+# 只有显式调用 cfg.apply_plusargs(why) 的流程才读：virtio 自测的 virtio_execution_mode_test 和 virtio_real_driver_flow_fixture。
+# 项目流程（virtio_work/integration/project、rdma_work/integration/project）不调用：先置 execution_mode=REAL_DUT，
+# 再由 load_params("vio") 读 vio.exec_mode / vio.completion_mode，因此这两个 plusarg 在项目流程中无效。
+# 二者与 vio.* 写同一字段（load_params 以字段当前值为默认），后执行者生效；非法值返回 0 和原因，由调用方报错。
+VIRTIO_EXEC_MODE: MODEL                            # MODEL 或 REAL_DUT（也认全小写）；对应 vio.exec_mode，类默认 MODEL
+VIRTIO_COMPLETION_MODE: MSIX                       # MSIX 或 POLLING（也认全小写）；对应 vio.completion_mode，类默认 MSIX
+
+
+# inter_pcie / host_mem / flow_control
+# inter_pcie：非测试代码不读任何运行期参数或 plusarg（plusarg 只在 tests/aip）。R-Tile 可调项只有编译宏
+# +define+INTEL_PCIE_DATA_WIDTH（256）/ INTEL_PCIE_SEGMENTS（4）/ INTEL_PCIE_HEADER_BIG_ENDIAN（1），以及
+# intel_pcie_adapter_config 字段（side、check_parity、credit_enable、header/data_capacity、infinite_*、tx_stop_latency、
+# rx_gap_cycles、rx_start_segment、x16_single_width），只能在代码中设置并经 config_db "intel_cfg" 下发；
+# 项目流程要求 side=INTEL_PCIE_HARD_IP、pcie.infinite_credit=1、pcie.ep_auto_response=0。
+# host_mem：不读任何运行期参数或 plusarg；分配参数由 dpu.mem_mode / dpu.mem_policy / dpu.mem_granule 读取后传入。
+# flow_control：不读任何运行期参数或 plusarg（含 test 目录）。
+
+# -----------------------------------------------------------------------------
+# 21 常用流程
+# -----------------------------------------------------------------------------
+# VIO（virtio_work 参考顶层 project_env）：project_base_test 读参后先执行 vio_dpu_cfg_seq 配置 DUT 表，再进入 Tcl。
+#   业务：vio_start → vio_tx / vio_rx_refill → vio_stop（只停 worker，可再 vio_start）；vio_release 停止并回收全部 VIO 队列。
+#   重载：vio_release → set_param … → load_params → 重新配置 DUT；virtio 参考顶层没有注册 dut_config，需集成方自行注册。
+# 组合顶层（rdma_work dpu_top_env）：Tcl dut_config 配置 DUT（VIO 与 RDMA 共用一个配置 sequence），然后执行各业务命令。
+#   重载：vio_release → set_param … → load_params → dut_config → vio_start / rdma_init。开启 RDMA 时，rdma_init 尝试过
+#   之后（成功或失败）同一 epoch 内的 load_params、dut_config 都会被拒，所以重载只能放在 rdma_init 之前。
+# 快照恢复：aip_restore → 重新 source AIP 加载脚本 → load_params → dut_config。恢复后参数宏改读本次 simv 的 plusarg，
+#   快照内的 set_param 覆盖仍优先；只在 build 时读取的参数（如 top.*、pcie.*）保持快照里的值。
