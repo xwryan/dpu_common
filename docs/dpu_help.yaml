@@ -9,9 +9,9 @@
 # 全大写的键（如 TAG_BIT、AIP_TCL）是原生 plusarg，写成 +NAME=值，不支持 set_param；<命令>.<参数> 形式的键（如
 # vio_tx.count、vio_rx_refill.qid）只是 Tcl 命令参数的记法，在命令行上写成 vio_tx count=100。
 #
-# 对应代码：各仓库的以下提交（2026-11-19；带 * 的是尚未推送到 GitHub 的本地提交）。
-#   aip_core 02f421e       dpu_common 0340e68    host_mem 830713f     pcie_work adb22be      inter_pcie 46a30a6
-#   net_packet da057fa     virtio_work df0d923*  rdma_work a1408da*   eth_seg_agent 1da2ba7  dpu_queue_work cc1c2c2
+# 对应代码：各仓库的以下提交（2026-11-20；带 * 的是尚未推送到 GitHub 的本地提交）。
+#   aip_core 02f421e       dpu_common 2e19bd8*   host_mem 830713f     pcie_work adb22be      inter_pcie 46a30a6
+#   net_packet da057fa     virtio_work f8b95a5*  rdma_work 21646a3*   eth_seg_agent 1da2ba7  dpu_queue_work cc1c2c2
 #   flow_control 877eefc
 # host_mem 由第 9 节的 dpu.mem_* 配置，自身不读参数；flow_control 不读参数；simflow 是运行流程工具，不在本文范围。
 #
@@ -117,6 +117,10 @@ dpu.h0.pf0.intel_pf: 0                             # Intel PF 编号 0..7
 dpu.h0.pf0.intel_vf: -1                            # PF 必须为 -1；VF 为 0..2047
 dpu.h0.pf0.vport: 0                                # vport 0..1023
 dpu.h0.pf0.bdf_index: 0                            # BDF 表索引 0..127，缺省等于 vport
+dpu.h0.pf0.pfvf: 0                                 # DUT 的 pfvf_id 0..1023；MSI-X linear 表按 Host/pfvf/本地向量查找，同一 Host 上有 MSI-X 消息的 Function 须各不相同，publish 时检查
+dpu.h0.pf0.first_vf_offset: 0                      # 只用于 PF：写进 PFVF 表的 first_vf_offset，0..1023；给在 VF 上即报错
+# pfvf、first_vf_offset 只能和上面四项路由一起给（无 VF 时 PF0 的缺省路由也算），缺省 0，dpu_common 不按拓扑推导编号。
+# pfvf 非 0 时要由平台的 dpu_env_cfg::validate_pfvf_relationship 核对（缺省实现只接受无 VF 的 PF0 且 pfvf=0）。
 dpu.h0.pf0.bar0.placement: DPU_ALLOC_AUTO          # BAR 放置：DPU_ALLOC_AUTO / DPU_ALLOC_PINNED；BAR 名为 bar0/bar2/bar4
 dpu.h0.pf0.bar0.base: 0                            # PINNED 基址：按大小对齐、在 BAR 窗口内、不与其他 BAR 或预留区重叠
 dpu.h0.pf0.bar0.size: 0x2000000                    # 须等于 DUT profile：PF bar0/2/4 = 32MB/64KB/64KB，VF = 16KB/16KB/32KB
@@ -126,6 +130,7 @@ dpu.h0.pf0.vf0.intel_pf: 0                         # 示例；VF 所属 Intel PF
 dpu.h0.pf0.vf0.intel_vf: 0                         # 示例；Intel VF 编号 0..2047
 dpu.h0.pf0.vf0.vport: 1                            # 示例；VF vport 0..1023
 dpu.h0.pf0.vf0.bdf_index: 1                        # 示例；VF 的 BDF 表索引 0..127，缺省等于 vport
+dpu.h0.pf0.vf0.pfvf: 1                             # 示例；VF 的 DUT pfvf_id 0..1023，缺省 0；与所属 PF 的 pfvf/first_vf_offset 的关系由平台 validator 核对
 
 # -----------------------------------------------------------------------------
 # 3 DUT 能力上限（dpu_common：dpu_dut_caps，路径 dpu.caps）
@@ -180,6 +185,7 @@ dpu.qsch.distinguish_business: 0                   # 读取但不参与表编码
 # -----------------------------------------------------------------------------
 # 路径 dpu.msix → dpu.hH.msix → dpu.hH.pfP[.vfV].msix，后者覆盖前者；值须非负。
 # 不给 msg_data_base 就不生成任何消息；vio.completion_mode=VIRTIO_COMPLETION_MSIX（缺省）时须给。
+# 同一 Host 上有多个 Function 带消息时，须给各自的 dpu.hH.pfP[.vfV].pfvf（第 2 节），否则 publish 报两者 share pfvf。
 dpu.msix.msg_data_base: 0x13572468                 # 示例；Message Data 模板，32 位
 dpu.msix.msg_data_stride: 0                        # 相邻向量的 Data 步长，32 位
 dpu.msix.msg_addr_base: 0x900000000000             # 示例；不给时每个 Function 在本 Host 窗口内随机选一个 4KB 页并预留
@@ -639,12 +645,14 @@ rdma.src_addr.alloc: random                        # 源地址表（全部 Funct
 rdma.h0.pf0.src_addr.idx: 1023                     # 示例：钉住该 Function 的首项，0..1023，冲突报错；写在全局层会让多个 Function 冲突
 # RDMA 相关的 dpu.qsch.rdma_vfs/dbq_pages/vports 与 dpu.*.msix 模板见第 5、6 节。
 
-# EQ MSI-X（build 读取；load_params 重读并提交，在 rdma_init 登记 EQ 接收时生效）
-rdma.msix: 0                                       # 1=rdma_init 为 CEQ/AEQ 登记 MSI-X 接收，并核对每个已消费的 EQE 都有中断
+# EQ MSI-X（build 读取；load_params 重读并提交，在 rdma_init 时生效）
+rdma.msix: 0                                       # 1=核对每个已消费的 EQE 都有中断，EQ 缺 MSI-X 消息即报错，report 打印各向量中断数；0=有消息的 EQ 中断照收，只在内部计数，不核对也不打印
 rdma.msix_per_msg: 1                               # 1=每个 EQE 一个中断；DUT 合并中断时设 0（每批一个）
 rdma.msix_grace_ns: 2000                           # 中断晚到上限（ns）
 rdma.msix_drop_at: -1                              # 仅模型：丢第 N 个中断做负向测试，-1 关闭
-# DPU 项目的 EQ 消息地址/数据取 dpu.*.msix 模板（无模板则轮询）；load_params 时按新模板刷新，向量号随 grant 不变。
+# DPU 项目的 EQ 向量向 dpu_common 租用，有 dpu.*.msix 模板的向量才生成消息（无模板就不写 MSI-X 表，只能轮询）。
+#   有消息时，仅 RDMA 与 VIO+RDMA 两条配置流程都按冻结值把它写进 MSI-X 表（含 masked），rdma_init 在 Host RC 为它登记接收，
+#   这两点都与 rdma.msix 无关。load_params 时按新模板刷新消息，向量号随 grant 不变。
 
 # 等待策略（仿真时间 ns；实际超时 = 基准 × multiplier）
 rdma.wait.poll_ns: 10                              # CMQ 等待轮询间隔，1..2^32-1
@@ -742,7 +750,8 @@ RXE_IP: 10.79.0.2                                  # rxe 侧 IPv4
 RDMA_RANDOM_COUNT: 200                             # 独立模型 rdma_random_vseq 的随机 verb 数
 # rxe 插件 pre_build 强制 mode=RXE、link_type=rdma_link_rxe、qp.timeout=0、qp.qkey=0x12345678（覆盖命令行值）。
 # 仅测试用：+RDMA_LINK/+RDMA_VSEQ（独立 env test 的 link/vseq 初值）、+EXPECT_DEPTH/+EXPECT_DRAWS（场景测试断言）、
-#   +RXE_CASES（rxe 用例数）、+RDMA_TEST_INIT、+grant_expect_qp[=N]（组合回归 fixture）。
+#   +RXE_CASES（rxe 用例数）、+RDMA_TEST_INIT、+grant_expect_qp[=N]（组合回归 fixture）、
+#   +RDMA_MSIX_EXPECT_MASKED（rdma_msix_test：要求至少一个 EQ 向量的消息是 masked）。
 # 已删除：rdma[.hH[.pfP[.vfV]]].resource.eth_port 出现即 build 报错（QSCH dport 跟随 route.dst_port，UD 为 15）；
 #   旧 rdma.biz.* 与 rdma.env 下的旧 QP 参数已删除但不报错（静默忽略）。
 
