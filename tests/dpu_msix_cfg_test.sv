@@ -2,6 +2,7 @@
 // 向量租约接在 resolver 记录的向量块和已登记消息之后，依次接续，越界的租约不占用向量；publish 前后都可租。
 // 同一 Host 上拥有消息的 Function 共用 pfvf 时 publish 拒绝；给出各自 pfvf 后线性目录按 Host/pfvf/local 排序。
 // 租过向量的 Function 即使只有轮询 service 也进入 MSI-X 编程范围；租约所在的资源快照之外的快照不能发布。
+// 消息目录的 global 向量整个 DPU 唯一，且不落在别的 Function 的向量块里（publish 与运行期候选都查）。
 module dpu_msix_cfg_test;
 	import uvm_pkg::*;
 	import dpu_resource_pkg::*;
@@ -20,6 +21,11 @@ module dpu_msix_cfg_test;
 		);
 			why = family.functions.size() == 1 ? "" : "fixture PF families have no VFs";
 			return family.functions.size() == 1;
+		endfunction
+
+		// 模拟平台在发布后改了显式消息目录：下一次运行期候选必须重新检查。
+		function void add_authored(input dpu_msix_message_t	message);
+			authored_messages.push_back(message);
 		endfunction
 	endclass
 
@@ -296,6 +302,44 @@ module dpu_msix_cfg_test;
 		check(cfg.publish(device, resources, map, why), {"publish of the leased resource snapshot: ", why});
 	endfunction
 
+	// 两个 Host 上同一个 global 被拒（单 bank 按 global 索引）；h1.pf1 没有模板、块内没有消息时，h0.pf1 的显式消息落进它的
+	// 向量块也被拒；发布后混进的冲突消息由运行期候选拒绝。
+	function automatic void check_globals();
+		dpu_env_cfg				cfg;
+		dpu_env_cfg				candidate;
+		msix_test_cfg			test_cfg;
+		dpu_device_snapshot		device;
+		dpu_resource_snapshot	resources;
+		dpu_bar_map				map;
+		dpu_msix_vector_block_t	blocks[$];
+		int unsigned			in_block;
+		string					why;
+
+		check(fixture(0, 0, cfg, device, resources, map, why), why);
+		cfg.messages.push_back(make_message(pf(0, 1), 41, 100, 'hb00));
+		cfg.messages.push_back(make_message(pf(1, 0), 40, 100, 'hb01));
+		check(!cfg.publish(device, resources, map, why) &&
+			why == "dpu.h0.pf1 local 41 and dpu.h1.pf0 local 40 share MSI-X global vector 100",
+			{"two messages on one global vector across Hosts: ", why});
+		aip_cmdline_override::clear("dpu.h1.pf1.msix.msg_data_base");
+		check(fixture(0, 0, cfg, device, resources, map, why), why);
+		resources.list_msix_vector_blocks(blocks);
+		foreach (blocks[b])
+			if (dpu_same_function_key(blocks[b].function_key, pf(1, 1))) in_block = blocks[b].global_base + 1;
+		cfg.messages.push_back(make_message(pf(0, 1), 50, in_block, 'hb02));
+		check(!cfg.publish(device, resources, map, why) && why ==
+			$sformatf("dpu.h0.pf1 local 50 uses MSI-X global vector %0d inside the vector block of dpu.h1.pf1", in_block),
+			{"a message inside another Function's vector block: ", why});
+		aip_cmdline_override::set_val("dpu.h1.pf1.msix.msg_data_base", $sformatf("%0d", 'h300));
+		check(fixture(0, 1, cfg, device, resources, map, why), why);
+		check($cast(test_cfg, cfg), "fixture cfg type");
+		test_cfg.add_authored(make_message(pf(0, 1), 41, 120, 'hb03));
+		test_cfg.add_authored(make_message(pf(1, 0), 40, 120, 'hb04));
+		check(!cfg.make_runtime_candidate(candidate, why) &&
+			why == "dpu.h0.pf1 local 41 and dpu.h1.pf0 local 40 share MSI-X global vector 120",
+			{"runtime candidate with two messages on one global vector: ", why});
+	endfunction
+
 	initial begin
 		string			fields[$] = '{"requester", "intel_pf", "intel_vf", "vport"};
 		string			values[$] = '{"1", "1", "-1", "1"};
@@ -340,6 +384,7 @@ module dpu_msix_cfg_test;
 		check_linear(cfg, pfvf);
 		check_lease_scope();
 		check_lease_snapshot();
+		check_globals();
 		// 平台在 publish 之前（env build）租向量，publish 后同一份快照上的租约接着排；另一份快照的租约被拒绝。
 		check(fixture(1, 0, early, device, resources, map, why), why);
 		check_lease(early, device, resources, 1);

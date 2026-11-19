@@ -147,6 +147,14 @@ class dpu_env_cfg extends uvm_object;
 		output string				why
 	);
 
+	// 消息目录的 global 向量在整个 DPU 唯一（resolver 只有一个向量计数，INFO/INTERVAL/TABLE 是按 global 索引的单 bank），
+	// 也不能落在别的 Function 的向量块里。租来的向量变成消息后同样受这条冻结检查。publish 与运行期候选在冻结消息前调用。
+	extern protected function bit check_msix_globals(
+		input dpu_msix_message_t	catalog[$],
+		input dpu_resource_snapshot	resources,
+		output string				why
+	);
+
 	// 按实际 TX 队列为每 Function 生成一个 net，同源 Host+同目的 dpt 共享 group（VNET lvl2 为源 Host）；结果稳定，释放/重载后才重新生成。
 	// 目的节点编号：ETH 从 0 开始，HOST 紧随实际 ETH 数；纯 RX/空配置不依赖 QSCH 参数。
 	extern protected function bit materialize_qsch_topology(output string	why);
@@ -1391,6 +1399,39 @@ function bit dpu_env_cfg::check_msix_pfvf(
 			return 0;
 		end
 		owner_by_slot[slot] = catalog[m].owner;
+	end
+	why = "";
+	return 1;
+endfunction
+
+function bit dpu_env_cfg::check_msix_globals(
+	input dpu_msix_message_t	catalog[$],
+	input dpu_resource_snapshot	resources,
+	output string				why
+);
+	dpu_msix_vector_block_t	blocks[$];
+	int						first[int unsigned];
+
+	if (resources != null) resources.list_msix_vector_blocks(blocks);
+	foreach (catalog[m]) begin
+		if (first.exists(catalog[m].global_vector)) begin
+			why = $sformatf("%s local %0d and %s local %0d share MSI-X global vector %0d",
+							function_param_path(catalog[first[catalog[m].global_vector]].owner),
+							catalog[first[catalog[m].global_vector]].local_vector,
+							function_param_path(catalog[m].owner), catalog[m].local_vector, catalog[m].global_vector);
+			return 0;
+		end
+		first[catalog[m].global_vector] = m;
+		foreach (blocks[b]) begin
+			if (dpu_same_function_key(blocks[b].function_key, catalog[m].owner) ||
+				catalog[m].global_vector < blocks[b].global_base ||
+				catalog[m].global_vector >= blocks[b].global_base + blocks[b].vector_count)
+				continue;
+			why = $sformatf("%s local %0d uses MSI-X global vector %0d inside the vector block of %s",
+							function_param_path(catalog[m].owner), catalog[m].local_vector, catalog[m].global_vector,
+							function_param_path(blocks[b].function_key));
+			return 0;
+		end
 	end
 	why = "";
 	return 1;
@@ -3174,7 +3215,9 @@ function bit dpu_env_cfg::make_runtime_candidate(
 		return 0;
 	end
 	if (!candidate.materialize_messages(resource_snapshot, why)) return 0;
-	if (!check_msix_pfvf(candidate.messages, frozen_functions, why)) return 0;
+	if (!check_msix_pfvf(candidate.messages, frozen_functions, why) ||
+		!check_msix_globals(candidate.messages, resource_snapshot, why))
+		return 0;
 	candidate.frozen_messages      = candidate.messages;
 	candidate.frozen_layouts       = candidate.table_layouts;
 	candidate.frozen_policies      = candidate.vio_policies;
@@ -3438,7 +3481,9 @@ function bit dpu_env_cfg::publish(
 			return 0;
 		end
 	end
-	if (!check_msix_pfvf(candidate.messages, function_policies, why)) return 0;
+	if (!check_msix_pfvf(candidate.messages, function_policies, why) ||
+		!check_msix_globals(candidate.messages, resources, why))
+		return 0;
 	// 此后没有可能失败的分支；一起发布身份、生成消息和公共表冻结值。
 	device_snapshot      = device;
 	resource_snapshot    = resources;
