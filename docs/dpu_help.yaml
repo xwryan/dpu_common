@@ -7,11 +7,11 @@
 # 覆盖顺序、取值语法和枚举写法见第 1 节。请一律写完整键：裸字段名（如 +pairs=2）会命中所有同名字段。
 # 为保持 YAML 合法，少数值加了引号，这些引号不属于值。
 # 全大写的键（如 TAG_BIT、AIP_TCL）是原生 plusarg，写成 +NAME=值，不支持 set_param；<命令>.<参数> 形式的键（如
-# vio_tx.count、rdma_run.f0）只是 Tcl 命令参数的记法，在命令行上写成 vio_tx count=100。
+# vio_tx.count、vio_rx_refill.qid）只是 Tcl 命令参数的记法，在命令行上写成 vio_tx count=100。
 #
 # 对应代码：VPS ~/Documents 的本地提交（2026-11-19），* 表示该提交尚未推送到 GitHub。
-#   aip_core 8a56f4f*      dpu_common 0340e68    host_mem 830713f     pcie_work adb22be*     inter_pcie 46a30a6
-#   net_packet fb8e2aa*    virtio_work 69b61f4*  rdma_work b1a19b1*   eth_seg_agent d792ca2* dpu_queue_work cc1c2c2*
+#   aip_core 2ca7420*      dpu_common 0340e68    host_mem 830713f     pcie_work adb22be*     inter_pcie 46a30a6
+#   net_packet 41d60e1*    virtio_work 018e6c8*  rdma_work 5f35ae8*   eth_seg_agent 1da2ba7* dpu_queue_work cc1c2c2*
 #   flow_control 877eefc
 # host_mem 由第 9 节的 dpu.mem_* 配置，自身不读参数；flow_control 不读参数；simflow 是运行流程工具，不在本文范围。
 #
@@ -38,7 +38,9 @@
 # 空值也算给出并屏蔽其后候选：空 plusarg 取宏默认值；空 override 对 aip_int/aip_string 取类型零值（不回退默认值），
 # _opt 宏保持原值。aip_cmdline_query::present 只判断键（含 key.x、key[i]、空值）是否给出，用于"给了才覆盖"。
 # 数值：十进制、0x/0b/0o/0d、'h/'b、8'hff，可加 _ 和正负号；超出目标位宽或显式位宽过大即 hard fatal，不截断。
-# 无符号目标（bit/logic 向量、*unsigned）与 aip_uint 出现负号即 hard fatal、不回绕；要全 1 就写出上界。
+# 无符号目标（bit/logic 向量、*unsigned）与 aip_uint 出现负号即 hard fatal、不回绕（-1 不表示全 1），要全 1 就写出上界。
+# 有符号目标（int、byte、shortint、longint、integer、bit signed）：纯十进制须在 [-2^(N-1), 2^(N-1)-1] 内；带基数或位宽的
+# 写法（0x、0b、N'h、'h 等）是位模式，须放得进 N 位并按补码解释：32'hFFFF_FFFF 给 int 得 -1，4294967295 给 int 报错。
 # 随机：[a:b] 或 a:b 闭区间；a,b,c 或 [a,b,c] 等概率选一；{v:=w,[a:b]:/w}（或用 () 包裹）权重组，:= 每值、:/ 整段，
 # 权重可为 0 但不能全 0；inc:a:b[:s] / dec:a:b[:s] 从等差序列随机取一个（不是逐次递增）；rand 为全位宽随机。
 # aip_core 不认 random（整数/枚举直接报错），仅个别项目字符串参数自行支持（如 dpu.qsch.*）。随机源 $urandom，跟随
@@ -50,12 +52,18 @@
 # 优先级 [i] > 整体列表 > .each > 默认，越界索引忽略。解析错误一律打印 [FATAL]（用户文件行号、+参数名、原文）
 # 并 $fatal(1)，不回退默认值；回归请加 simv -exitstatus 以拿到非 0 退出码。
 # 日志：每次宏读取打印 [aip_cmdline] param '<leaf>' (scope='<path>') = 值（数组为 array、队列为 queue_summary），
-# 按完整键限次；直接调用 get_single_value 不打印。下面两个开关在首次打印时读一次，之后改用 Tcl
-# set_cmdline_print enable=0|1 max_prints=N（并清零计数）；set_param/clear_param 另打印 [SET_PARAM]/[CLEAR_PARAM]。
+# 按完整键限次（超过上限照常抽样，只是不打印）；直接调用 get_single_value 不打印。下面两个开关在首次打印时读一次，
+# 之后的 set_param 和 aip_restore 后新给的 plusarg 都不生效，运行中只能用 Tcl set_cmdline_print enable=0|1 max_prints=N
+# （并清零计数）；set_param/clear_param 另打印 [SET_PARAM]/[CLEAR_PARAM]。
 # 快照：aip_restore 后重新 source 加载脚本，参数宏改读本次 simv 的 plusargs；快照内 set_param 覆盖仍优先，已赋值变量不刷新。
 # 等待策略 <prefix>.wait.poll_ns/timeout_ns/multiplier/max_polls（aip_wait_policy，默认 10ns/10000ns/1/10000，须 1..2^32-1）
-# 由各 env 传前缀读取。AIP 命令参数为 key=value；wait=0|1 为框架保留键（默认 1），seq 命令另有 count=N（默认 1）/ time=T，
-# 同名命令运行中再发返回 BUSY。Tcl 变量（非 plusarg）：::aip_echo 1、::aip_ack_timeout_ns 52000、::aip_ckpt_dir ./aip_ckpt；
+# 由各 env 传前缀读取。AIP 命令参数为 key=value；wait=0|1 为框架保留键（默认 1），seq 命令另有 count=N（默认 1，
+# 0..0x7fffffff 的无符号整数）/ time=T（上限，sequence 先结束就提前返回），同名命令运行中再发返回 BUSY。
+# seq 命令结果为 "OK: <命令>: …" 或 "ERROR: <命令>: …"（带 status，Tcl aip_check_status 可判断）；声明了参数键的命令
+# 拒绝未知键并列出允许的键；sequencer 找不到时返回 "ERROR: <命令>: sequencer is null"。
+# aip_bind_seq cmd=<新命令> type=<seq 类> sqr=<aip_sqr_registry 名或 UVM 全路径> [path=<参数路径>] 在运行中把 seq 类绑成
+# 新命令（path= 只对以 aip_seq_type_path 声明的类有效），aip_unbind_seq cmd= 解除，aip_sqr_list 列出已登记的 sequencer。
+# Tcl 变量（非 plusarg）：::aip_echo 1、::aip_ack_timeout_ns 52000、::aip_ckpt_dir ./aip_ckpt；
 # 命令看门狗用 Tcl set_cmd_watchdog ns=N 调（默认 50000，0 禁用）。
 aip_cmdline.print_enable: 1                        # 参数读取日志总开关，0 关闭（解析与报错照常）
 aip_cmdline.max_prints: 10                         # 每个完整键最多打印次数；-1 不限，0 不打印
@@ -337,15 +345,20 @@ TAG_BIT: 8                                         # 示例；仅 8 或 10，否
 # -----------------------------------------------------------------------------
 # 层顺序 vio → vio.hH → vio.hH.pfP[.vfV].i0，后层覆盖前层（显式 0 也算），实例号固定 i0。
 # 两个参考顶层（virtio 的 project_env、rdma 的 dpu_top_env）都用外部配置模式，缺省 REAL_DUT、vio.pairs=0。
-# Tcl load_params 重载时不能改：各 service 的 enabled、pairs、queue_type、features，以及 exec_mode、iova_*、iommu_strict、
-# scb、coverage、dpu.mem_*；其余 service 键（方向开关、queue_size、notify、completion 等）可在重载时修改。
+# Tcl load_params 重载时不能改：各 service 的 enabled、pairs、queue_type（含 pN/qN 逐队列格式）、features，以及 exec_mode、
+# iova_*、iommu_strict、scb、coverage、dpu.mem_*；其余 service 键（方向开关、queue_size、notify、completion 等）可在重载时修改。
 vio.enabled: 1                                     # 是否创建 VIO service；最终还要求 tx_enable 或 rx_enable 为 1 且 pairs≠0
 vio.tx_enable: 1                                   # 是否启用 TX
 vio.rx_enable: 1                                   # 是否启用 RX
 vio.pairs: 0                                       # 队列对数 0..32（另受 dpu.caps 限制）；项目缺省 0 即不建 VIO 队列，VIP 类本身缺省 1
 vio.queue_size: 256                                # 环深度，2 的幂；写 DUT 表要求 32..32768，Custom 队列 ≤4096
-vio.queue_type: VQ_PACKED                          # 整个 service 的队列格式，有队列时须显式给 VQ_PACKED 或 VQ_CUSTOM（类缺省 VQ_SPLIT 会被拒绝）
-vio.features: VERSION_1,RING_PACKED                # Packed 缺省即此值（掩码 0x0000000500000000）；Custom 不能给非 0 特性
+vio.queue_type: VQ_PACKED                          # service 级队列格式，有队列时须显式给 VQ_PACKED 或 VQ_CUSTOM（类缺省 VQ_SPLIT 会被拒绝）
+vio.p1.queue_type: VQ_CUSTOM                       # 示例；pair 1 的 RX、TX 两个队列改用此格式，只认 PACKED/CUSTOM；各层都可写（vio.hH.pfP[.vfV].i0.pN）
+vio.q2.queue_type: VQ_CUSTOM                       # 示例；单个队列（RX=2i、TX=2i+1），qN > pN > service，同类中路径越具体越优先；N 超出队列数忽略
+# 逐对/逐队列格式只用于外部（项目）流程，传统流程给出即 fatal。含 Custom 队列时 queue_size ≤4096，并读 13 节的 private.*。
+# 全部为 Custom 时没有 Virtio 特性，notify_encoding 未给时取 DPU32（显式给非 DPU32 报错）；混合时 features、notify_encoding、
+# rx_buf_size 只作用于标准队列，Custom 队列固定用 DPU32 doorbell、取 vio.private.rx_buf_size。
+vio.features: VERSION_1,RING_PACKED                # Packed 缺省即此值（掩码 0x0000000500000000）；全部为 Custom 时不能给非 0 特性
 # 特性名是规范名去掉 VIRTIO_F_/VIRTIO_NET_F_ 前缀，逗号分隔、不区分大小写；也可写一个整数掩码，二者不能混写，未知名称报错。
 # Packed 必须含 VERSION_1、RING_PACKED，另可选 RING_EVENT_IDX、IN_ORDER、NOTIFICATION_DATA、ACCESS_PLATFORM、CSUM、
 # HOST_TSO4、HOST_TSO6、HOST_USO；TSO/USO 须同时有 CSUM。特性只声明能力，每包 offload 由 vio.tx.csum/gso/mss 请求。
@@ -357,7 +370,7 @@ vio.completion_mode: VIRTIO_COMPLETION_MSIX        # VIRTIO_COMPLETION_MSIX / VI
 vio.notify_bar: 0                                  # doorbell 所在 BAR，0..5
 vio.notify_base: 0                                 # 队列 0 doorbell 的 BAR 内偏移；标准队列须显式给出（出现即生效），否则写表报 no explicit doorbell binding
 vio.notify_stride: 0                               # doorbell 偏移 = notify_base + 本地 qid×stride，须 ≤0xffffffff、对齐且在 BAR 内
-vio.notify_encoding: VIO_NOTIFY_QID16              # 标准队列：QID16 / DATA32（需 NOTIFICATION_DATA）/ DPU32；Custom 未给 notify_base 时用 DPU32
+vio.notify_encoding: VIO_NOTIFY_QID16              # 标准队列：QID16 / DATA32（需 NOTIFICATION_DATA）/ DPU32；全部为 Custom 且未给时取 DPU32
 vio.h0.pf0.i0.pairs: 1                             # 示例；只给 Host0 PF0 的 service 1 个队列对
 vio.h0.pf0.i0.rx_enable: 0                         # 示例；只关闭 Host0 PF0 的 RX
 vio.h0.pf0.vf0.i0.pairs: 2                         # 示例；VF 的 service 路径为 vio.hH.pfP.vfV.i0
@@ -387,7 +400,7 @@ vio.wait.multiplier: 1                             # 全部超时倍率
 vio.wait.max_polls: 10000                          # 最大轮询次数
 
 # -----------------------------------------------------------------------------
-# 13 Custom 私有队列（vio.queue_type=VQ_CUSTOM 的 service 才读）
+# 13 Custom 私有队列（含 Custom 队列的 service 才读）
 # -----------------------------------------------------------------------------
 # 先逐层读 <层>.private.*，再逐层读 <层>.private.qN.*（N 为队列号：RX=2i、TX=2i+1），qN 优先。
 vio.private.queue_size: 256                        # 可不给，缺省等于 vio.queue_size；给了须相等，2..4096 的 2 的幂
@@ -414,10 +427,12 @@ vio.private.q0.local_qid: 0                        # 示例；缺省 local_qid_b
 # -----------------------------------------------------------------------------
 # 项目流程注册 vio_start、vio_tx、vio_rx_refill、vio_stop（vio_platform_pkg），另有无参的 load_params、vio_release；
 # rdma 组合顶层另有 dut_config。参数在命令执行时读取，vio.tx.* 每包重读，随机表达式逐包抽样。
-# 命令只接受 count=（vio_tx/vio_rx_refill，正整数，缺省 1）和 wait=；不支持 time=。失败时报 uvm_error VIO_SEQ。
+# 结果为 "OK: <命令>: 摘要" 或 "ERROR: <命令>: 原因"（带 status）；vio_tx 的 OK 只表示已提交，DUT 完成与比对看 scoreboard。
+# 参数键：vio_tx 收 pair=，vio_rx_refill 收 qid=，其余无参数；另可写 count=（vio_tx/vio_rx_refill 为正整数、缺省 1，其余只能
+# 为 1）和 wait=；time= 与未知键都返回 ERROR，找不到目标返回 sequencer is null。
 vio.target: h0.pf0.i0                              # 示例；vio_start/vio_stop 的目标 h<H>.pf<P>[.vf<V>].i<I>，只登记了一个目标时可省
 vio.tx.target: h0.pf0.i0                           # 示例；vio_tx 的目标，未给用 vio.target
-vio.tx.pair: 0                                     # 队列对下标（不是 raw qid），须小于活动队列对数
+vio.tx.pair: 0                                     # 队列对下标（不是 raw qid），须小于活动队列对数；命令写了 pair=N 时以命令为准
 vio.tx.kind: ETH_IPV4_TCP                          # 报文模板（net_packet 的 packet_template_e）
 vio.tx.len: 64                                     # 帧长，含各层协议头、不含 Virtio 头；14 ≤ len_min ≤ len_max ≤ 65535
 vio.tx.len_min: 64                                 # 随机长度下限，未给时等于 len
@@ -430,10 +445,22 @@ vio.tx.gso: 0                                      # 本包 GSO/TSO，隐含 che
 vio.tx.mss: 1460                                   # GSO MSS
 vio.tx.desc_count: 3                               # 示例；每包描述符总数（含 header/TSO 槽），未给取格式最少值，显式 0 报错
 vio.tx.seg_mode: VIO_SEG_EQUAL                     # 多描述符切分：VIO_SEG_EQUAL / VIO_SEG_RANDOM
+# 除 pair 外每个 vio.tx 键（含 hdr.*、priv.*）都可按 pair 覆盖：本命令 pair=N 时，vio.tx.pN.<键> 给出即覆盖 vio.tx.<键>。
+# len_min/len_max 两层都没给时取合并后的 len；csum/gso/mss 任一层给出就带 offload 请求。
+vio.tx.p1.kind: ETH_IPV6_UDP                       # 示例；只在 pair=1 时生效
+vio.tx.p1.len: 512                                 # 示例
+# 不同 pair 并发发包要用不同命令名（同名命令运行中再发为 BUSY）：
+#   aip_bind_seq cmd=vio_tx_p1 type=vio_tx_seq sqr=<virtio_sequencer 全路径>，再执行 vio_tx_p1 pair=1 count=N。
+# priv.*：Custom TX 首描述符字段，每包抽样，只覆盖给出的字段，其余沿用 vio.private[.qN].* 的冻结值；目标 TX 队列是
+# 标准队列时报错。字段与位宽：dport_info 12、dport_id 10、dport_type 3、cpu_tx_cos 3、fwd 2，rss_lag、l3_cs、l4_cs、
+# i_l3_cs、i_l4_cs 各 1 位。
+vio.tx.priv.dport_id: 5                            # 示例；作用于所有 pair 的 Custom TX 包
+vio.tx.p1.priv.fwd: 2                              # 示例；只作用于 pair 1
 vio.rx.target: h0.pf0.i0                           # 示例；vio_rx_refill 的目标，未给用 vio.target
 vio.rx.qid: 0                                      # 示例；无缺省：命令写 qid=N 或给此参数，须为已启用的偶数 RX 队列号（2i）
 vio.rx.count: 64                                   # 示例；命令未写 count= 时的补充数量
 # <命令>.<参数> 只是 Tcl 命令参数的记法，不是参数键（+vio_tx.count 无效）。vio_start、vio_stop、vio_release 无参数。
+vio_tx.pair: 1                                     # 示例；Tcl：vio_tx pair=1 count=10；0..31，严格解析，优先于 vio.tx.pair
 vio_tx.count: 1                                    # Tcl：vio_tx count=100；正整数，缺省 1
 vio_rx_refill.qid: 0                               # 示例；Tcl：vio_rx_refill qid=0 count=64；未写时取 vio.rx.qid
 vio_rx_refill.count: 1                             # Tcl：count=64；未写时取 vio.rx.count，再缺省 1
@@ -460,7 +487,9 @@ vio.rss.indirection_table[0]: 0                    # 示例；表项须小于活
 # 报 uvm_error NET_PACKET_PARAM 并忽略（vio_tx 的该包仍提交，之后停止并报错）；报文级键和非协议名的首段写错不检查。
 vio.tx.hdr.tmpl: ETH_IPV4_UDP                      # 示例；packet_template_e（键名不是 pkt_kind），可逗号候选或 rand，覆盖 vio.tx.kind
 vio.tx.hdr.pkt_rand_kind: PKT_CAT_TCP              # 示例；pkt_category_e，未给 tmpl 时按类别随机选模板
-# tmpl/pkt_rand_kind 给出时重建协议栈，本包此前加载的层字段与 VLAN 全部丢弃；tmpl 候选模板中出现的层名不报 NET_PACKET_PARAM。
+# tmpl/pkt_rand_kind 给出时重建协议栈，本包此前加载的层字段与 VLAN 全部丢弃。以下层名不报 NET_PACKET_PARAM：本包协议栈、
+# tmpl 候选模板（pkt_rand_kind 时为全部模板）、调用方用 packet::set_possible_kinds() 声明的模板。vio_tx 对 vio.tx.hdr.* 声明
+# vio.tx.kind 与各 vio.tx.pN.kind 候选的并集，只有某个 pair 用到的层写在这里不会误报；vio.tx.pN.hdr.* 只按本 pair 的 kind。
 vio.tx.hdr.pkt_len: 512                            # 示例；整帧字节数（不含 FCS），覆盖 vio.tx.len 的抽样值，须容纳全部头尾
 vio.tx.hdr.outer_vlan_num: 1                       # 示例；第 1 个 Ethernet 后的 VLAN 标签数 0~4，给出即替换模板原有标签（0 删除）
 vio.tx.hdr.inner_vlan_num: 1                       # 示例；第 2 个（隧道内层）Ethernet 后的标签数，包内没有第 2 个 Ethernet 时非 0 即 fatal
