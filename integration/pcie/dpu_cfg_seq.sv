@@ -166,8 +166,9 @@ class dpu_cfg_seq extends uvm_sequence #(pcie_tl_tlp);
 	);
 
 	// 统一表项写序：≤128 bit 表项每次发 32 bit，高位 DWORD 放高地址、DWORD 内字节不反转；
-	// 首笔前检查整项宽度、已知值、BAR 与 4KB 范围，禁止先发送再发现越界。
-	extern protected task write_table_dwords(
+	// 首笔前检查整项宽度、已知值、BAR 与 4KB 范围，禁止先发送再发现越界。按已解析的 BAR 目标写，与按名字的
+	// pcie_table_write_by_name 同一路径；平台自己的写表 helper（如 RDMA hw plan）经 seq 句柄调用。
+	extern task write_table_dwords(
 		input dpu_bar_target_t	target,
 		input logic [63:0]		offset,
 		input int unsigned		length,

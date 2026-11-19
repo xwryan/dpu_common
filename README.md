@@ -24,6 +24,8 @@ DPU 按这些值生成表，不能再次分配或猜测 descriptor 地址。
 body 在 AF 声明前先预检它在 VIO 之前要写的全部公共记录（已配置的公共类别、BDF、MSI-X 及单 bank 未用尾部）：
 每条 DWORD 对齐、不跨 4KB，记录之间以及与 AF 握手、Notify 使能寄存器互不重叠；失败时不发任何事务。
 派生 sequence 用同一个 `validate_targets()` 检查自己要写的批次。
+`write_table_dwords(target, offset, length, data, ok, why)` 是公开的统一表项写序（按已解析的 BAR 目标；按名字用
+`pcie_table_write_by_name`），平台自己的写表 helper 经 sequence 句柄调用它，不必在每个派生类里各写一份循环。
 每批 Notify 成功后，每个管理 BAR 写一次 ready=1（bank0）：VIO 写 `+0x80044`，RDMA 写 `+0x80048`；
 空批次不写，失败停止。
 AF `+0x1010` 的写 magic/读状态8，以及每100次 DWORD 写同步读均保留。
