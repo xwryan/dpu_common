@@ -138,4 +138,12 @@ typedef struct {
     int unsigned global_msix_vector_id;
 } dpu_msix_control_binding_t;
 
+// resolver 给一个 Function 的连续 MSI-X 向量块：global [global_base, global_base + vector_count)，local 从 0 起。
+// 块内依次是 LAN、mailbox，AF 另有额外向量区；未用的保留向量也在块内。
+typedef struct {
+    dpu_function_key_t function_key;
+    int unsigned global_base;
+    int unsigned vector_count;
+} dpu_msix_vector_block_t;
+
 `endif // DPU_PLACEMENT_TYPES_SV

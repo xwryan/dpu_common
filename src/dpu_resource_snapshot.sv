@@ -1,4 +1,4 @@
-// 资源解析结果快照：VIO qpair、AF extra queue、控制中断向量、保留区间及反向索引；freeze 后只读。
+// 资源解析结果快照：VIO qpair、AF extra queue、控制中断向量、每 Function 的 MSI-X 向量块、保留区间及反向索引；freeze 后只读。
 `ifndef DPU_RESOURCE_SNAPSHOT_SV
 `define DPU_RESOURCE_SNAPSHOT_SV
 
@@ -11,6 +11,7 @@ class dpu_resource_snapshot extends uvm_object;
     protected dpu_vio_qpair_binding_t m_bindings[$];
     protected dpu_af_extra_queue_binding_t m_af_extra_bindings[$];
     protected dpu_msix_control_binding_t m_msix_control_bindings[$];
+    protected dpu_msix_vector_block_t m_msix_blocks[$];
     protected int unsigned m_request_index[string];
     protected int unsigned m_service_local_index[string];
     protected int unsigned m_service_virtio_pair_index[string];
@@ -675,6 +676,8 @@ class dpu_resource_snapshot extends uvm_object;
                                             msix_occupied, msix_owner, msix_local,
                                             function_local_global, diagnostic))
             return 0;
+        if (!validate_msix_vector_blocks(device_snapshot, caps, diagnostic))
+            return 0;
         begin
             dpu_normalized_vio_request requests[$];
             m_plan.list_requests(requests);
@@ -813,6 +816,81 @@ class dpu_resource_snapshot extends uvm_object;
         return 1;
     endfunction
 
+    // resolver 记录的向量块互不重叠、在 DUT 容量内，每个绑定（VIO、AF 额外队列、控制中断）都在本 Function 的块内且
+    // global = base + local。手工构建、没有记录块的快照不检查（向量租约要求快照有块）。
+    protected function bit validate_msix_vector_blocks(
+        input dpu_device_snapshot device_snapshot,
+        input dpu_dut_caps caps,
+        output dpu_placement_diagnostic diagnostic
+    );
+        dpu_function_key_t keys[$];
+        dpu_function_key_t owners[$];
+        int unsigned locals[$];
+        int unsigned globals[$];
+        int unsigned base[string];
+        int unsigned count[string];
+
+        if (m_msix_blocks.size() == 0)
+            return 1;
+        device_snapshot.list_functions(keys);
+        foreach (m_msix_blocks[index]) begin
+            dpu_msix_vector_block_t b;
+            bit known;
+
+            b = m_msix_blocks[index];
+            known = 0;
+            foreach (keys[k])
+                if (dpu_same_function_key(keys[k], b.function_key))
+                    known = 1;
+            if (!known || (b.vector_count == 0) ||
+                (b.global_base + b.vector_count > caps.global_msix_vector_count)) begin
+                set_failure(diagnostic, DPU_PLACE_ERR_INVALID_REQUEST,
+                            "MSI-X vector block has an unknown owner or exceeds DUT global vector capacity");
+                diagnostic.set_function_context(b.function_key);
+                return 0;
+            end
+            foreach (m_msix_blocks[other])
+                if ((other < index) &&
+                    (b.global_base < m_msix_blocks[other].global_base + m_msix_blocks[other].vector_count) &&
+                    (m_msix_blocks[other].global_base < b.global_base + b.vector_count)) begin
+                    set_failure(diagnostic, DPU_PLACE_ERR_INVALID_REQUEST,
+                                "MSI-X vector blocks overlap");
+                    diagnostic.set_function_context(b.function_key);
+                    return 0;
+                end
+            base[dpu_function_key_name(b.function_key)] = b.global_base;
+            count[dpu_function_key_name(b.function_key)] = b.vector_count;
+        end
+        foreach (m_bindings[index]) begin
+            owners.push_back(m_bindings[index].service_key.function_key);
+            locals.push_back(m_bindings[index].local_msix_vector_id);
+            globals.push_back(m_bindings[index].global_msix_vector_id);
+        end
+        foreach (m_af_extra_bindings[index]) begin
+            owners.push_back(m_af_extra_bindings[index].af_function_key);
+            locals.push_back(m_af_extra_bindings[index].local_msix_vector_id);
+            globals.push_back(m_af_extra_bindings[index].global_msix_vector_id);
+        end
+        foreach (m_msix_control_bindings[index]) begin
+            owners.push_back(m_msix_control_bindings[index].function_key);
+            locals.push_back(m_msix_control_bindings[index].local_msix_vector_id);
+            globals.push_back(m_msix_control_bindings[index].global_msix_vector_id);
+        end
+        foreach (owners[index]) begin
+            string name;
+
+            name = dpu_function_key_name(owners[index]);
+            if (!base.exists(name) || (locals[index] >= count[name]) ||
+                (globals[index] != base[name] + locals[index])) begin
+                set_failure(diagnostic, DPU_PLACE_ERR_INVALID_REQUEST,
+                            "MSI-X binding lies outside its Function vector block");
+                diagnostic.set_function_context(owners[index]);
+                return 0;
+            end
+        end
+        return 1;
+    endfunction
+
     function bit set_normalized_plan(
         input dpu_normalized_placement_plan plan,
         output dpu_placement_diagnostic diagnostic
@@ -934,6 +1012,25 @@ class dpu_resource_snapshot extends uvm_object;
         return 1;
     endfunction
 
+    // 每个 Function 至多一个块；重叠与绑定归属在 freeze 时核对。
+    function bit add_msix_vector_block(
+        input dpu_msix_vector_block_t block,
+        output dpu_placement_diagnostic diagnostic
+    );
+        if (!mutable(diagnostic))
+            return 0;
+        foreach (m_msix_blocks[index]) begin
+            if (dpu_same_function_key(m_msix_blocks[index].function_key, block.function_key)) begin
+                set_failure(diagnostic, DPU_PLACE_ERR_INVALID_REQUEST,
+                            "resource snapshot has a duplicate MSI-X vector block");
+                diagnostic.set_function_context(block.function_key);
+                return 0;
+            end
+        end
+        m_msix_blocks.push_back(block);
+        return 1;
+    endfunction
+
     function bit freeze(
         input dpu_device_snapshot device_snapshot,
         output dpu_placement_diagnostic diagnostic
@@ -981,6 +1078,13 @@ class dpu_resource_snapshot extends uvm_object;
         bindings.delete();
         if (m_frozen)
             bindings = m_msix_control_bindings;
+    endfunction
+
+    // resolver 分给各 Function 的向量块（没有向量的 Function 不在其中）；未冻结或手工构建的快照返回空。
+    function void list_msix_vector_blocks(ref dpu_msix_vector_block_t blocks[$]);
+        blocks.delete();
+        if (m_frozen)
+            blocks = m_msix_blocks;
     endfunction
 
     // Function 的某个控制中断向量；未分配（无 VIO qpair 的非 AF Function 没有列入 msix_control_functions、

@@ -57,6 +57,10 @@ class dpu_env_cfg extends uvm_object;
 	// MSI-X 线性查找表按 Host/PFVF/local vector 排序，global vector 只保存到内容。
 	dpu_table_item_t	msix_linear_records[$];
 	protected bit		msix_directory_ready;
+	// MSI-X 向量租约（lease_msix_vectors）：首次租约从资源快照的向量块和消息目录取起点，之后依次接续。
+	protected dpu_resource_snapshot	msix_lease_resources;
+	protected int unsigned			msix_lease_global;
+	protected int unsigned			msix_lease_local[string];
 
 	dpu_table_layout_t		frozen_layouts[dpu_table_kind_e];
 	dpu_function_policy_t	frozen_functions[string];
@@ -289,6 +293,20 @@ class dpu_env_cfg extends uvm_object;
 
 	// AF 额外资源只来自同一资源快照，不虚构 ring。
 	extern function void list_af_extra_queues(output dpu_af_extra_queue_binding_t records[$]);
+
+	// MSI-X 向量租约：dpu_common 不分配向量的服务（如 RDMA EQ）每次给一个 Function 租 count 个连续向量。global 号在
+	// 资源快照全部向量块和已登记消息之后，local 号在该 Function 自己的向量块和消息之后；后续租约依次接续，不回收。
+	// 快照须已解析冻结且同源，可在 publish 之前调用（发布后须是同一份）；超出 DUT global 容量或每 Function 64 个
+	// local 向量（消息目录上限）时返回 0，不占用向量。
+	extern function bit lease_msix_vectors(
+		input dpu_device_snapshot	device,
+		input dpu_resource_snapshot	resources,
+		input dpu_function_key_t	key,
+		input int unsigned			count,
+		output int unsigned			global_base,
+		output int unsigned			local_base,
+		output string				why
+	);
 
 	// 发布仅接受同源且冻结的 device/resources/BAR；消息与分组先在局部值中验证。
 	// 全部通过后才更新句柄及冻结值；首次或再次发布失败都保持原来的可见状态。
@@ -3172,6 +3190,80 @@ endfunction
 function void dpu_env_cfg::list_af_extra_queues(output dpu_af_extra_queue_binding_t records[$]);
 	records.delete();
 	if (resource_snapshot != null) resource_snapshot.list_af_extra_queue_bindings(records);
+endfunction
+
+function bit dpu_env_cfg::lease_msix_vectors(
+	input dpu_device_snapshot	device,
+	input dpu_resource_snapshot	resources,
+	input dpu_function_key_t	key,
+	input int unsigned			count,
+	output int unsigned			global_base,
+	output int unsigned			local_base,
+	output string				why
+);
+	dpu_dut_caps			caps;
+	dpu_pcie_function_id_t	id;
+	string					name;
+
+	global_base = 0;
+	local_base  = 0;
+	why         = "MSI-X vector lease requires frozen same-source device and resource snapshots";
+	if (device == null || resources == null || !device.is_frozen() || !resources.is_frozen() ||
+		!resources.references_device_snapshot(device))
+		return 0;
+	if ((device_snapshot != null && device_snapshot != device) ||
+		(resource_snapshot != null && resource_snapshot != resources) ||
+		(msix_lease_resources != null && msix_lease_resources != resources)) begin
+		why = "MSI-X vector lease belongs to another resource snapshot";
+		return 0;
+	end
+	if (!device.get_pcie_id(key, id, why)) return 0;
+	if (msix_lease_resources == null) begin
+		dpu_msix_vector_block_t			blocks[$];
+		dpu_vio_qpair_binding_t			pairs[$];
+		dpu_af_extra_queue_binding_t	extras[$];
+
+		resources.list_msix_vector_blocks(blocks);
+		resources.list_vio_bindings(pairs);
+		resources.list_af_extra_queue_bindings(extras);
+		if (blocks.size() == 0 && (pairs.size() != 0 || extras.size() != 0)) begin
+			why = "resource snapshot has no MSI-X vector blocks; resolve it with dpu_resource_resolver";
+			return 0;
+		end
+		msix_lease_global = 0;
+		msix_lease_local.delete();
+		foreach (blocks[b]) begin
+			msix_lease_local[dpu_function_key_name(blocks[b].function_key)] = blocks[b].vector_count;
+			if (blocks[b].global_base + blocks[b].vector_count > msix_lease_global)
+				msix_lease_global = blocks[b].global_base + blocks[b].vector_count;
+		end
+		foreach (messages[m]) begin
+			string	owner;
+
+			owner = dpu_function_key_name(messages[m].owner);
+			if (messages[m].global_vector >= msix_lease_global) msix_lease_global = messages[m].global_vector + 1;
+			if (!msix_lease_local.exists(owner) || messages[m].local_vector >= msix_lease_local[owner])
+				msix_lease_local[owner] = messages[m].local_vector + 1;
+		end
+		msix_lease_resources = resources;
+	end
+	name        = dpu_function_key_name(key);
+	caps        = device.snapshot_dut_caps();
+	global_base = msix_lease_global;
+	local_base  = msix_lease_local.exists(name) ? msix_lease_local[name] : 0;
+	if (count == 0 || caps == null || global_base + count > caps.global_msix_vector_count ||
+		local_base + count > 64) begin
+		why = $sformatf({"MSI-X lease of %0d vectors (global %0d, local %0d) exceeds the DUT global capacity %0d ",
+						 "or the 64 local vectors of a Function"}, count, global_base, local_base,
+						caps == null ? 0 : caps.global_msix_vector_count);
+		global_base = 0;
+		local_base  = 0;
+		return 0;
+	end
+	msix_lease_global      = global_base + count;
+	msix_lease_local[name] = local_base + count;
+	why                    = "";
+	return 1;
 endfunction
 
 function bit dpu_env_cfg::publish(

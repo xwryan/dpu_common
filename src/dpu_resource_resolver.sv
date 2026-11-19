@@ -164,6 +164,7 @@ class dpu_resource_resolver extends uvm_object;
         int unsigned function_qpair_count[string];
         int unsigned function_lan_msix_count[string];
         int unsigned function_msix_base[string];
+        int unsigned function_msix_count[string];
         dpu_function_key_t function_keys[$];
         dpu_function_key_t control_functions[$];
         dpu_function_key_t expected_af_key;
@@ -493,6 +494,7 @@ class dpu_resource_resolver extends uvm_object;
             if (dpu_same_function_key(function_keys[function_index],
                                       expected_af_key))
                 next_msix_vector += caps.af_extra_msix_vectors;
+            function_msix_count[function_name] = next_msix_vector - function_msix_base[function_name];
             if (next_msix_vector > caps.global_msix_vector_count) begin
                 set_failure(diagnostic,
                             DPU_PLACE_ERR_DEVICE_CAPACITY_EXHAUSTED,
@@ -506,6 +508,21 @@ class dpu_resource_resolver extends uvm_object;
         if (!resource_snapshot.set_normalized_plan(normalized_plan, diagnostic)) begin
             resource_snapshot = null;
             return 0;
+        end
+        // 向量块随快照发布，向 dpu_common 租向量的服务（dpu_env_cfg::lease_msix_vectors）不必反推这里的布局。
+        foreach (function_keys[function_index]) begin
+            dpu_msix_vector_block_t block;
+
+            function_name = dpu_function_key_name(function_keys[function_index]);
+            if (!function_msix_count.exists(function_name) || (function_msix_count[function_name] == 0))
+                continue;
+            block.function_key = function_keys[function_index];
+            block.global_base = function_msix_base[function_name];
+            block.vector_count = function_msix_count[function_name];
+            if (!resource_snapshot.add_msix_vector_block(block, diagnostic)) begin
+                resource_snapshot = null;
+                return 0;
+            end
         end
         foreach (candidates[index]) begin
             dpu_vio_qpair_binding_t binding;
