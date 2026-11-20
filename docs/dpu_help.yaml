@@ -768,7 +768,7 @@ AIP_TCL: 1                                         # 原始开关，只看是否
 # vio_release）时，dut_config 不碰 DUT、直接返回 ERROR；真正执行时的失败仍是 fatal。
 # 组合顶层缺省：RDMA 关闭（example test 改为开启）、vio.pairs=0、VIO 为 REAL_DUT 外部配置、RDMA mode=DUT、vseq=rdma_traffic_vseq。
 
-# 业务报文比对（示例参考：integration/project/compare/，不在项目 filelist 里；编译时加 compare/compare.f，还需 ETH_SEG_AGENT_ROOT）
+# 业务报文比对（示例参考：integration/project/compare/，不在项目 filelist 里；编译时在 -F eth_seg_agent.f（其前置含 flow_control.f）之后加 compare/compare.f）
 top.compare_type: dpu_top_cmp                      # 示例；factory 类型名，dpu_top_env 在 build 末尾创建子节点 compare；不给则不创建
 # dpu_top_cmp 登记各 Host VIO 的 VTX/VRX 采样点，并注册 aip end checker dpu_cmp。两条链：ETH RX → 参考模型 → 目标 Function 的 VRX；
 # VTX → 参考模型 → ETH TX。按内容键无序匹配、逐字节比较整帧，RoCEv2（UDP 4791）两向都排除。dpu_cmp.* 在 build 读取，

@@ -196,29 +196,79 @@ host_mem manager，Host 之间地址可以重叠。内存、BAR 与 MSI-X 消息
 
 ## 编译
 
-将 `DPU_COMMON_ROOT` 指向本仓库根目录、`AIP_CORE_ROOT` 指向 aip_core，先加入
-aip_core 自己的 `aip_core.f`，再加入本仓库的 `dpu_common.f`：
+每个项目只有一个主 filelist `<repo>/<repo>.f`，用大写 `-F` 引用：VCS 把其中的相对路径和 `+incdir+`
+改写为相对该 filelist 所在目录，所以不需要 `*_ROOT` 环境变量，也可以在任意目录编译（不要用小写 `-f`）。
+filelist 不拉入依赖，先加入 aip_core 自己的 `aip_core.f`，再加入本仓库的 `dpu_common.f`：
 
 ```bash
-export DPU_COMMON_ROOT=/path/to/dpu_common AIP_CORE_ROOT=/path/to/aip_core
 vcs -full64 -sverilog -ntb_opts uvm -timescale=1ns/1ps \
-    -f "$AIP_CORE_ROOT/aip_core.f" \
-    -f "$DPU_COMMON_ROOT/dpu_common.f" \
+    -F /path/to/aip_core/aip_core.f \
+    -F /path/to/dpu_common/dpu_common.f \
     your_tb.sv
 ```
 
-aip_core 在每次编译中只编译一次；`dpu_common.f` 只含本仓库的 incdir 与 package 入口。
+aip_core 在每次编译中只编译一次；`dpu_common.f` 只含本仓库的 incdir 与根入口 `dpu_common_pkg.sv`
+（它 include `src/dpu_resource_pkg.sv`）。使用方在自己的 package/module 内写一行
+`` `include "dpu_common_import.svh" ``（即 `import dpu_resource_pkg::*;`）。
 
 `dpu_resource_pkg` 的实现通过 package 内的 include 按依赖顺序编译；
 因此不应再把同一批 `src/*.sv` 文件逐个加入编译命令。
 
-具体 PCIe 集成在 `dpu_common.f` 和 pcie_work 的 `pcie_work.f` 之后显式加入：
+具体 PCIe 集成在 `dpu_common.f` 和 pcie_work 的 `pcie_work.f` 之后显式加入 add-on：
 
 ```text
--f $DPU_COMMON_ROOT/dpu_common_pcie.f
+-F /path/to/dpu_common/dpu_common_pcie.f      // package/module 内 `include "dpu_common_pcie_import.svh"
 ```
 
-该入口不重复编译核心，也不依赖 VIO 或参考 project。
+该入口不重复编译核心，也不依赖 VIO 或参考 project。它需要 pcie_work，而 `pcie_work.f`（含 DPU 适配层）
+需要 dpu_common，所以它不能并入 `dpu_common.f`，作为 add-on 保留。
+
+### DPU 平台各项目的编译顺序
+
+整个平台按下面的顺序每个项目写一行 `-F`（用不到的项目可以省略，但相对顺序不变；每个主 filelist 开头的注释
+列出它自己的前置项目）：
+
+```text
+-F <ws>/aip_core/aip_core.f
+-F <ws>/host_mem/host_mem.f
+-F <ws>/flow_control/flow_control.f
+-F <ws>/net_packet/net_packet.f
+-F <ws>/dpu_common/dpu_common.f
+-F <ws>/pcie_work/pcie_work.f
+-F <ws>/dpu_common/dpu_common_pcie.f        // add-on，virtio_work/dpu_queue_work/rdma_work 都需要
+-F <ws>/inter_pcie/inter_pcie.f
+-F <ws>/eth_seg_agent/eth_seg_agent.f
+-F <ws>/virtio_work/virtio_work.f
+-F <ws>/dpu_queue_work/dpu_queue_work.f
+-F <ws>/rdma_work/rdma_work.f
+```
+
+每个项目根目录还有 `<repo>_import.svh`，只含本项目各 package 的 `import <pkg>::*;`。在使用方自己的
+package 或 module 内部按需各写一行 `` `include "<repo>_import.svh" ``（路径由各主 filelist 的
+`+incdir+./` 提供；不能用一个 facade package 代替：VCS 只转发 facade 自己引用过的 `export` 名字，package
+也看不到 `$unit` 里的 import）。
+
+可选 add-on（同样用 `-F`，放在各自前置项目之后）：
+
+| add-on | 用途 | 前置 |
+| --- | --- | --- |
+| `dpu_common/dpu_common_pcie.f` | PCIe TL 配置包 `dpu_pcie_pkg` | pcie_work |
+| `pcie_work/pcie_work_svt.f` | Synopsys SVT 适配层（另需 `PCIE_SVT_ROOT`、`DESIGNWARE_HOME`） | pcie_work |
+| `inter_pcie/inter_pcie_bind.f` | R-Tile bind wrapper（绑定真实 DUT 时才加） | inter_pcie |
+| `eth_seg_agent/eth_seg_agent_bind.f` | eth_seg bind wrapper（bind 到已有 DUT 时才加） | eth_seg_agent |
+| `virtio_work/virtio_work_platform.f` | VIO 平台公共步骤 `vio_platform` 与项目业务命令 | inter_pcie、virtio_work |
+| `virtio_work/virtio_work_project.f` | Intel 参考 project env `vio_top_env_pkg` | virtio_work_platform.f |
+| `rdma_work/rdma_work_rxe.f` | Soft-RoCE(rxe) 互打（DPI C 仍用 `RDMA_WORK_ROOT` 定位） | rdma_work |
+
+已删除的 filelist 及替代：
+
+| 已删除 | 替代 |
+| --- | --- |
+| `pcie_work/pcie_work_dpu.f` | 并入 `pcie_work/pcie_work.f`（因此 pcie_work 前须有 dpu_common） |
+| `eth_seg_agent/eth_seg_agent_net_packet.f` | 并入 `eth_seg_agent/eth_seg_agent.f`（前须有 net_packet） |
+| `eth_seg_agent/eth_seg_agent_flow.f` | 并入 `eth_seg_agent/eth_seg_agent.f`（前须有 flow_control、net_packet） |
+| `virtio_work/virtio_work_dpu.f` | 并入 `virtio_work/virtio_work.f`（前须有 dpu_common_pcie.f） |
+| `rdma_work/rdma_work_project.f` | 并入 `rdma_work/rdma_work.f`（前须有 virtio_work） |
 
 ## 快照到 PCIe
 
