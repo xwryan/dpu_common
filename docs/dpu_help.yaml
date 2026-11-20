@@ -10,9 +10,9 @@
 # vio_tx.count、vio_rx_refill.qid）只是 Tcl 命令参数的记法，在命令行上写成 vio_tx count=100。
 #
 # 对应代码：各仓库的以下提交（2026-11-20；带 * 的是尚未推送到 GitHub 的本地提交）。
-#   aip_core 02f421e       dpu_common 2e19bd8*   host_mem 830713f     pcie_work adb22be      inter_pcie 46a30a6
-#   net_packet da057fa     virtio_work f8b95a5*  rdma_work 21646a3*   eth_seg_agent 1da2ba7  dpu_queue_work cc1c2c2
-#   flow_control 877eefc
+#   aip_core 6211ce9       dpu_common e61e286    host_mem 557af36     pcie_work a61b86c      inter_pcie fd36553
+#   net_packet 7dd10da     virtio_work aea7478   rdma_work 52ca22f    eth_seg_agent b1277c3  dpu_queue_work 5648732
+#   flow_control 2b58bce
 # host_mem 由第 9 节的 dpu.mem_* 配置，自身不读参数；flow_control 不读参数；simflow 是运行流程工具，不在本文范围。
 #
 # 目录
@@ -34,7 +34,7 @@
 # set_param 只存原文，下次执行读取宏时才求值、校验（写入成功不代表合法）；已建好的组件不会因改参自动重建。
 # 候选键：完整路径 → 别名（aip_cmdline_alias，如 net_packet 的 outer_ipv4 简写 ipv4）→ 裸叶名。先按此序查全部 override，
 # 再查 plusarg：override 一律优先（叶名 override 也压过完整路径 plusarg）；同一 plusarg 重复给出取最后一个。
-# 裸叶名命中所有同名叶子：+pairs=2 同时作用于 vio.pairs、vio.h0.pf0.i0.pairs、vio.mq.pairs 等，务必写完整路径。
+# 裸叶名命中所有同名叶子：+pairs=2 同时作用于 vio.pairs、vio.h0.pf0.pairs、vio.mq.pairs 等，务必写完整路径。
 # 空值也算给出并屏蔽其后候选：空 plusarg 取宏默认值；空 override 对 aip_int/aip_string 取类型零值（不回退默认值），
 # _opt 宏保持原值。aip_cmdline_query::present 只判断键（含 key.x、key[i]、空值）是否给出，用于"给了才覆盖"。
 # 数值：十进制、0x/0b/0o/0d、'h/'b、8'hff，可加 _ 和正负号；超出目标位宽或显式位宽过大即 hard fatal，不截断。
@@ -171,7 +171,7 @@ dpu.qsch.print: 0                                  # 打印 Function/net/group �
 dpu.qsch.net_id: random                            # 示例；net 号表达式（固定值、范围、rand），0..1023，全局唯一；缺省 AUTO 取全局 Function ID
 dpu.qsch.group_id: random                          # 示例；组号表达式；缺省 AUTO 取 host_id*16+dpt，RANDOM 取 rand
 dpu.qsch.dpt: 0                                    # 目的节点：ETHn=n，HOSTh=eth_ports+h（h<5）；可写 rand 或范围
-# 以下是队列表策略中 qsch.* 字段的最底层，第 8 节的 vio、vio.hH、vio.hH.pfP[.vfV].i0 层依次覆盖。
+# 以下是队列表策略中 qsch.* 字段的最底层，第 8 节的 vio、vio.hH、vio.hH.pfP[.vfV] 层依次覆盖。
 # 某一层给出任一策略键，即为该层下的每个 service 生成策略。
 dpu.qsch.cos: 0                                    # service COS，0..7
 dpu.qsch.net_base: 0                               # MANUAL：net = net_base + pair*net_stride，须 <1024
@@ -244,7 +244,7 @@ vio.notify_table.reg_target: h0.pf0.bar0           # 覆盖 dpu.vio_notify.reg_t
 # -----------------------------------------------------------------------------
 # 8 VIO 队列表策略（dpu_common 读取，写 VTX/VRX/QSCH/Notify 表用）
 # -----------------------------------------------------------------------------
-# 层顺序 dpu（只读 qsch.*）→ vio → vio.hH → vio.hH.pfP[.vfV].i0，后层覆盖前层；未给的字段取 0。
+# 层顺序 dpu（只读 qsch.*）→ vio → vio.hH → vio.hH.pfP[.vfV]，后层覆盖前层；未给的字段取 0。
 # 某层给出任一键即为该层下的 service 生成策略；有队列的 service 没有策略时写表报 "queue platform policy missing"。
 # 下面标"须"的几项不给就无法写表：notify_net_pair5=1；开 RX 时 prefetch_ram、dsc_pre_max_num 与 prefetch_slots。
 vio.notify_net_pair5: 1                            # 须为 1（缺省 0 时生成 Notify 表报错）：单 bank pair5 是唯一支持的编码
@@ -276,7 +276,7 @@ vio.qsch.eth_ports: 8                              # 示例（缺省 0）；MANU
 vio.qsch.ets: 0                                    # 0/1，须等于 dpu.qsch.mode
 vio.qsch.ets_priority: 0                           # MANUAL 且 ets=1 时作 G2P lvl2，0..7
 vio.qsch.distinguish_business: 0                   # 读取但不参与表编码
-vio.h0.pf0.i0.qsch.net_id: 100                     # 示例；只给 h0.pf0 的 service 固定 Net ID
+vio.h0.pf0.qsch.net_id: 100                        # 示例；只给 h0.pf0 的 service 固定 Net ID
 
 # -----------------------------------------------------------------------------
 # 9 Host memory（host_mem；两个参考顶层 build 时经 vio_platform 读取）
@@ -351,7 +351,7 @@ TAG_BIT: 8                                         # 示例；仅 8 或 10，否
 # -----------------------------------------------------------------------------
 # 11 VIO service（virtio_work：virtio_net_env_config）
 # -----------------------------------------------------------------------------
-# 层顺序 vio → vio.hH → vio.hH.pfP[.vfV].i0，后层覆盖前层（显式 0 也算），实例号固定 i0。
+# 层顺序 vio → vio.hH → vio.hH.pfP[.vfV]，后层覆盖前层（显式 0 也算）。路径不带 .i0；旧写法 vio.hH.pfP[.vfV].i0.* 给出即报 fatal。
 # 两个参考顶层（virtio 的 vio_top_env、rdma 的 dpu_top_env）都用外部配置模式，缺省 REAL_DUT、vio.pairs=0。
 # Tcl load_params 重载时不能改：各 service 的 enabled、pairs、queue_type（含 pN/qN 逐队列格式）、features，以及 exec_mode、
 # iova_*、iommu_strict、scb、coverage、dpu.mem_*；其余 service 键（方向开关、queue_size、notify、completion 等）可在重载时修改。
@@ -361,7 +361,7 @@ vio.rx_enable: 1                                   # 是否启用 RX
 vio.pairs: 0                                       # 队列对数 0..32（另受 dpu.caps 限制）；项目缺省 0 即不建 VIO 队列，VIP 类本身缺省 1
 vio.queue_size: 256                                # 环深度，2 的幂；写 DUT 表要求 32..32768，Custom 队列 ≤4096
 vio.queue_type: VQ_PACKED                          # service 级队列格式，有队列时须显式给 VQ_PACKED 或 VQ_CUSTOM（类缺省 VQ_SPLIT 会被拒绝）
-vio.p1.queue_type: VQ_CUSTOM                       # 示例；pair 1 的 RX、TX 两个队列改用此格式，只认 PACKED/CUSTOM；各层都可写（vio.hH.pfP[.vfV].i0.pN）
+vio.p1.queue_type: VQ_CUSTOM                       # 示例；pair 1 的 RX、TX 两个队列改用此格式，只认 PACKED/CUSTOM；各层都可写（vio.hH.pfP[.vfV].pN）
 vio.q2.queue_type: VQ_CUSTOM                       # 示例；单个队列（RX=2i、TX=2i+1），qN > pN > service，同类中路径越具体越优先；N 超出队列数忽略
 # 逐对/逐队列格式只用于外部（项目）流程，传统流程给出即 fatal。含 Custom 队列时 queue_size ≤4096，并读 13 节的 private.*。
 # 全部为 Custom 时没有 Virtio 特性，notify_encoding 未给时取 DPU32（显式给非 DPU32 报错）；混合时 features、notify_encoding、
@@ -379,10 +379,10 @@ vio.notify_bar: 0                                  # doorbell 所在 BAR，0..5
 vio.notify_base: 0                                 # 队列 0 doorbell 的 BAR 内偏移；标准队列须显式给出（出现即生效），否则写表报 no explicit doorbell binding
 vio.notify_stride: 0                               # doorbell 偏移 = notify_base + 本地 qid×stride，须 ≤0xffffffff、对齐且在 BAR 内
 vio.notify_encoding: VIO_NOTIFY_QID16              # 标准队列：QID16 / DATA32（需 NOTIFICATION_DATA）/ DPU32；全部为 Custom 且未给时取 DPU32
-vio.h0.pf0.i0.pairs: 1                             # 示例；只给 Host0 PF0 的 service 1 个队列对
-vio.h0.pf0.i0.rx_enable: 0                         # 示例；只关闭 Host0 PF0 的 RX
-vio.h0.pf0.vf0.i0.pairs: 2                         # 示例；VF 的 service 路径为 vio.hH.pfP.vfV.i0
-vio.h0.pf0.vf0.i0.features: VERSION_1,RING_PACKED,RING_EVENT_IDX # 示例；只改 VF0 的特性
+vio.h0.pf0.pairs: 1                                # 示例；只给 Host0 PF0 的 service 1 个队列对
+vio.h0.pf0.rx_enable: 0                            # 示例；只关闭 Host0 PF0 的 RX
+vio.h0.pf0.vf0.pairs: 2                            # 示例；VF 的 service 路径为 vio.hH.pfP.vfV
+vio.h0.pf0.vf0.features: VERSION_1,RING_PACKED,RING_EVENT_IDX # 示例；只改 VF0 的特性
 
 # 以下只读 vio、vio.hH（service 层写了也不读），只在 build 时读取。
 vio.exec_mode: VIRTIO_EXEC_REAL_DUT                # 项目只接受 REAL_DUT，hH 层须与全局一致；VIP 类本身缺省 MODEL
@@ -438,8 +438,8 @@ vio.private.q0.local_qid: 0                        # 示例；缺省 local_qid_b
 # 结果为 "OK: <命令>: 摘要" 或 "ERROR: <命令>: 原因"（带 status）；vio_tx 的 OK 只表示已提交，DUT 完成与比对看 scoreboard。
 # 参数键：vio_tx 收 pair=，vio_rx_refill 收 qid=，其余无参数；另可写 count=（vio_tx/vio_rx_refill 为正整数、缺省 1，其余只能
 # 为 1）和 wait=；time= 与未知键都返回 ERROR，找不到目标返回 sequencer is null。
-vio.target: h0.pf0.i0                              # 示例；vio_start/vio_stop 的目标 h<H>.pf<P>[.vf<V>].i<I>，只登记了一个目标时可省
-vio.tx.target: h0.pf0.i0                           # 示例；vio_tx 的目标，未给用 vio.target
+vio.target: h0.pf0                                 # 示例；vio_start/vio_stop 的目标 h<H>.pf<P>[.vf<V>]，只登记了一个目标时可省
+vio.tx.target: h0.pf0                              # 示例；vio_tx 的目标，未给用 vio.target
 vio.tx.pair: 0                                     # 队列对下标（不是 raw qid），须小于活动队列对数；命令写了 pair=N 时以命令为准
 vio.tx.kind: ETH_IPV4_TCP                          # 报文模板（net_packet 的 packet_template_e）
 vio.tx.len: 64                                     # 帧长，含各层协议头、不含 Virtio 头；14 ≤ len_min ≤ len_max ≤ 65535
@@ -464,7 +464,7 @@ vio.tx.p1.len: 512                                 # 示例
 # i_l3_cs、i_l4_cs 各 1 位。
 vio.tx.priv.dport_id: 5                            # 示例；作用于所有 pair 的 Custom TX 包
 vio.tx.p1.priv.fwd: 2                              # 示例；只作用于 pair 1
-vio.rx.target: h0.pf0.i0                           # 示例；vio_rx_refill 的目标，未给用 vio.target
+vio.rx.target: h0.pf0                              # 示例；vio_rx_refill 的目标，未给用 vio.target
 vio.rx.qid: 0                                      # 示例；无缺省：命令写 qid=N 或给此参数，须为已启用的偶数 RX 队列号（2i）
 vio.rx.count: 64                                   # 示例；命令未写 count= 时的补充数量
 # <命令>.<参数> 只是 Tcl 命令参数的记法，不是参数键（+vio_tx.count 无效）。vio_start、vio_stop、vio_release 无参数。
@@ -475,9 +475,9 @@ vio_rx_refill.count: 1                             # Tcl：count=64；未写时�
 
 # 普通标准驱动（自测，virtio_net_vip/src/seq/virtio_aip_commands.sv）另注册 vio_init、vio_set_mq、vio_set_rss、vio_reset，
 # 以及独立发包流 vio_tx0/vio_tx1（参数路径 vio.tx0.*/vio.tx1.*）；它们与项目命令不能编进同一个工程，外部配置模式拒绝执行。
-vio.mq.target: h0.pf0.i0                           # 示例；vio_set_mq 的目标（仅标准驱动）
+vio.mq.target: h0.pf0                              # 示例；vio_set_mq 的目标（仅标准驱动）
 vio.mq.pairs: 1                                    # vio_set_mq 的活动队列对数（仅标准驱动）
-vio.rss.target: h0.pf0.i0                          # 示例；vio_set_rss 的目标（仅标准驱动）
+vio.rss.target: h0.pf0                             # 示例；vio_set_rss 的目标（仅标准驱动）
 vio.rss.hash_types: 0                              # RSS hash 类型（仅标准驱动）
 vio.rss.hash_key_size: 40                          # RSS key 字节数，1..255
 vio.rss.hash_key[0]: 0                             # 示例；key 第 0 字节
@@ -772,7 +772,7 @@ AIP_TCL: 1                                         # 原始开关，只看是否
 top.compare_type: dpu_top_cmp                      # 示例；factory 类型名，dpu_top_env 在 build 末尾创建子节点 compare；不给则不创建
 # dpu_top_cmp 登记各 Host VIO 的 VTX/VRX 采样点，并注册 aip end checker dpu_cmp。两条链：ETH RX → 参考模型 → 目标 Function 的 VRX；
 # VTX → 参考模型 → ETH TX。按内容键无序匹配、逐字节比较整帧，RoCEv2（UDP 4791）两向都排除。dpu_cmp.* 在 build 读取，
-# 各 Function 的 mac/vlan/port 在 end_of_elaboration 读取（路径 dpu_cmp.hH.pfP[.vfV].iN）。
+# 各 Function 的 mac/vlan/port 在 end_of_elaboration 读取（路径 dpu_cmp.hH.pfP[.vfV]，不带 .i0，旧写法给出即报 fatal）。
 # TX 出口：标准队列走 Function 的缺省端口；Custom 队列按描述符 fwd：DROP=0、CPU=3 不出 ETH，RSV=2 按 fwd_rsv 处理，
 # NORMAL=1 按 dport_type/dport_id 选口（eth_dport_type、dport_other）。RX 还比较接收队列：期望由参考模型
 # predict_rx_queue() 给出，缺省固定 0，与 VRX 样本的 local_qid（第 i 对的 RX 队列为 2i）比较；多对队列且 DUT 按 RSS
@@ -789,9 +789,9 @@ dpu_cmp.eth_dport_type: -1                         # Custom 描述符 dport_type
 dpu_cmp.dport_other: DPU_CMP_DPORT_NOT_ETH         # eth_dport_type 已配置时，NORMAL 但 dport_type 不是 ETH 编码（如 Host）的包：NOT_ETH 不出 ETH，DPU_CMP_DPORT_DEFAULT_PORT 走缺省端口
 dpu_cmp.fwd_rsv: DPU_CMP_RSV_REPORT                # fwd=RSV(2) 的包：REPORT 报 UVM_ERROR DPU_CMP_FWD_RSV，DPU_CMP_RSV_COUNT 只计数；都不登记期望
 # 已删除：dpu_cmp.fwd_direct，不再读取（给了也不报错）；出口改按 fwd 的固定编码和上面三个参数判定。
-dpu_cmp.h0.pf0.i0.mac: 0x020000000010              # 示例；该 Function 的 MAC，RX 帧按 DMAC 找 Function；无缺省
-dpu_cmp.h0.pf0.i0.vlan: 100                        # 示例；该 Function 收的 VLAN（12 位）；不给只收无 VLAN 帧
-dpu_cmp.h0.pf0.i0.port: 1                          # 示例；该 Function 的缺省出口端口，缺省取 dpu_cmp.port
+dpu_cmp.h0.pf0.mac: 0x020000000010                 # 示例；该 Function 的 MAC，RX 帧按 DMAC 找 Function；无缺省
+dpu_cmp.h0.pf0.vlan: 100                           # 示例；该 Function 收的 VLAN（12 位）；不给只收无 VLAN 帧
+dpu_cmp.h0.pf0.port: 1                             # 示例；该 Function 的缺省出口端口，缺省取 dpu_cmp.port
 
 # -----------------------------------------------------------------------------
 # 18 ETH 分段 agent（eth_seg_agent）
