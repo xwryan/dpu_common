@@ -1039,7 +1039,9 @@ function void dpu_env_cfg::load_platform_params();
 			$sformatf("vio.h%0d.pf%0d", service.function_key.host_id, service.function_key.pf_id);
 		if (service.function_key.kind == DPU_FUNCTION_VF)
 			path = {path, $sformatf(".vf%0d", service.function_key.vf_id)};
-		paths.push_back({path, ".i0"});
+		if (aip_cmdline_query::present(path, "i0"))
+			`uvm_fatal("PROJECT_CFG", {path, ".i0.* was renamed to ", path, ".*"})
+		paths.push_back(path);
 		begin
 			dpu_qsch_input_t	request;
 			string				owner;

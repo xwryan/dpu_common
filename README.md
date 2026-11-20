@@ -69,13 +69,13 @@ group_id 时取 `host_id*16+dpt`。固定值直接生效，不需要开启随机
 旧 `net_min/net_max` 已替换为单个 `net_id` 表达式。
 
 覆盖顺序为 `dpu.qsch.* → vio.qsch.* → vio.hH.qsch.* →
-vio.hH.pfP[.vfV].i0.qsch.*`。例如同 Host 的 PF0 发向 ETH0，PF1 发向 HOST0：
+vio.hH.pfP[.vfV].qsch.*`。例如同 Host 的 PF0 发向 ETH0，PF1 发向 HOST0：
 
 ```text
-+vio.h0.pf0.i0.qsch.net_id=100 +vio.h0.pf0.i0.qsch.group_id=20
-+vio.h0.pf0.i0.qsch.dpt=0
-+vio.h0.pf1.i0.qsch.net_id=200 +vio.h0.pf1.i0.qsch.group_id=30
-+vio.h0.pf1.i0.qsch.dpt=8
++vio.h0.pf0.qsch.net_id=100 +vio.h0.pf0.qsch.group_id=20
++vio.h0.pf0.qsch.dpt=0
++vio.h0.pf1.qsch.net_id=200 +vio.h0.pf1.qsch.group_id=30
++vio.h0.pf1.qsch.dpt=8
 +dpu.qsch.eth_ports=8
 ```
 
