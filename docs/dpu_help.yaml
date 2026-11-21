@@ -694,12 +694,13 @@ rdma.mem.mr_remote_atomic: 1                       # 远端原子权限，cas/fa
 
 # RDMA 场景：报文属性（0=链路/驱动缺省；IPv4 可写点分或数值）
 # 独立模型只有 rdma.env.link_type=rdma_link_netpkt 接受非 0 值（否则 build 拒绝）；DPU 项目写入 QPC 与源地址表。
-rdma.pkt.src_mac: 0x020000000001                   # 示例，缺省 0；DPU 必填：DUT 自己的 MAC，rdma_init 写入源地址表
-rdma.pkt.src_ip: 10.0.0.1                          # 示例，缺省 0；DPU 必填：DUT 自己的 IPv4
-rdma.pkt.dst_mac: 0                                # 双端时非 0 即作 RTR DMAC（0 用对端 env MAC）；rdma_run dmac 缺省
+# 源 MAC 是 QP 所属 Function 的 MAC：DPU 取第 2 节的 dpu.hH.pfP[.vfV].mac（缺省 02:00:00:<Host>:<vport>），独立模型取
+# 02:00:00:00:10:00 + 节点下标；netpkt 链路按它编码帧的源 MAC。已删除：rdma.pkt.src_mac（给出即 fatal）。
+rdma.pkt.src_ip: 10.0.0.1                          # 示例，缺省 0；DPU 必填：DUT 自己的 IPv4，rdma_init 与 Function 的 MAC 一起写入源地址表
+rdma.pkt.dst_mac: 0                                # 双端时非 0 即作 RTR DMAC（0 用对端 Function 的 MAC）；rdma_run dmac 缺省
 rdma.pkt.dst_ip: 0                                 # 对端 IPv4；DPU 写入 QPC 目的 GID（::ffff:a.b.c.d）
 rdma.pkt.vlan_en: 0                                # VLAN 开关；DPU 在 RTR 时写入 QPC
-rdma.pkt.vlan_id: 0                                # VLAN ID，0..4095；DPU 在 RTR 时写入 QPC
+rdma.pkt.vlan_id: 0                                # VLAN ID，0..4095；DPU 在 RTR 时写入 QPC。交换 VLAN（vlan_en 且 vlan_id 非 0 时为 vlan_id；不带 VLAN 或 vlan_id 为 0 的 priority tag 为发送端 pvid）不是对端成员、或 vlan_id 不是本端成员时报 warning RDMA_VLAN_NOT_MEMBER
 rdma.pkt.udp_sport: 0                              # UDP 源端口，0..65535；DPU 在 RTR 时写入 QPC
 
 # RDMA 场景：流量
@@ -728,6 +729,7 @@ rdma.traffic.imm: ""                               # SEND_IMM/WRITE_IMM 立即�
 # RDMA Tcl 命令（rdma.enabled=1 时注册；sequence 在 src/tb/dpu/rdma_runtime_seq.sv，sequencer 以 aip_sqr_registry 名 rdma 登记）
 # 顺序：[set_param → load_params] → dut_config → rdma_init → rdma_run…。rdma_init 无参数，须在成功的 dut_config 之后，每个复位
 #   epoch 只能尝试一次（失败或被 kill 都不能重试），运行期间其他 rdma_* 命令被拒；尝试过后 load_params、dut_config 均被拒。
+#   rdma_init 成功的摘要按 global ID 列出各 RDMA Function：f<ID>=hH.pfP[.vfV] mac<ID>=0x<MAC>（启动脚本据此找本端参数）。
 # 结果为 "OK: <命令>: <摘要>" 或 "ERROR: <命令>: <原因>"（带 status，Tcl aip_check_status 可判断），未知参数报错并列出允许的键。
 # rdma_run、rdma_rx_wait 只接受 count=1（缺省），不接受 time=；wait=0 后台执行。RDMA 未开启时命令仍存在，返回 sequencer is null。
 # 每个键依次取：命令参数 > rdma.run.<键>（plusarg 或 set_param，每次启动重读）> 行内注明的缺省。只接受整数字面量（十进制或 0x），
@@ -746,7 +748,7 @@ rdma.run.rx_only: 0                                # 1=只建接收端、预投 
 rdma.run.tx_peer: 0                                # 1=只建发送端，发给本 env 之外的接收方（如另一仿真里的 rx_only）：按接收端结果行的同一模板发 count 条、逐条不等待，再等全部发送完成（RC 等 ACK）并核对完成状态；结果行与 rx_only 同字段同含义；与 tx_only/rx_only 互斥
 rdma.run.dest_qpn: 0x12345                         # 示例；对端 QPN（多 QP 时为对端连续一段的起点），缺省 rdma.qp.dest_qpn；tx_only/rx_only/tx_peer 须 1..0xffffff
 rdma.run.dest_qkey: 0x80010000                     # UD 对端 Q_Key，缺省 rdma.qp.qkey，≤0xffffffff
-rdma.run.dmac: 0x001122334455                      # 示例；对端 MAC（dst_mac 为别名），缺省 rdma.pkt.dst_mac；tx_only/rx_only/tx_peer 须非 0
+rdma.run.dmac: 0x001122334455                      # 示例；对端 MAC（dst_mac 为别名），缺省 rdma.pkt.dst_mac；tx_only/rx_only/tx_peer 须非 0；等于本端 Function 的 MAC 时报 RDMA_DMAC_SELF
 # 以下单端键只在 rx_only/tx_peer 下读，用在别的模式时写在命令参数里即返回 ERROR，路径值不读。
 rdma.run.local_qpn: 0x10                           # 示例，缺省 0；本端 QPN（多 QP 时为连续 qps 个号的起点）。逐个核对：非 0/1、<rdma.resource.qp_count、未占用，否则 ERROR、不建资源；0 由驱动分配（多 QP 时从驱动下一个空闲号起取一段）
 rdma.run.psn: 0x100                                # 示例，缺省 rdma.qp.psn；RX-only 的 rq_psn / TX-peer 的 SQ 起点，两端须相同
@@ -810,7 +812,10 @@ AIP_TCL: 1                                         # 原始开关，只看是否
 top.compare_type: dpu_top_cmp                      # 示例；factory 类型名，dpu_top_env 在 build 末尾创建子节点 compare；不给则不创建
 # dpu_top_cmp 登记各 Host VIO 的 VTX/VRX 采样点，并注册 aip end checker dpu_cmp。两条链：ETH RX → 参考模型 → 目标 Function 的 VRX；
 # VTX → 参考模型 → ETH TX。按内容键无序匹配、逐字节比较整帧，RoCEv2（UDP 4791）两向都排除。dpu_cmp.* 在 build 读取，
-# 各 Function 的 mac/vlan/port 在 end_of_elaboration 读取（路径 dpu_cmp.hH.pfP[.vfV]，不带 .i0，旧写法给出即报 fatal）。
+# 各 Function 的 port 在 end_of_elaboration 读取（路径 dpu_cmp.hH.pfP[.vfV]，不带 .i0，旧写法给出即报 fatal）；Function 的
+# mac/pvid/pri/trunk 取第 2 节 dpu.hH.pfP[.vfV].mac / .vlan.* 的发布值。VLAN 按驱动的 VLAN 感知桥：无标签或 priority tag 归入
+# 入口 PVID（ETH 为 dpu_cmp.eth_pvid，VTX 为源 Function 的 pvid），RX 选 mac 与归类 VLAN 都匹配的 Function，VTX 带标签而 VLAN
+# 不是源 Function 的成员时预期在入口丢弃；出口 VLAN 等于出口 PVID 时去掉外层标签，否则补或改写外层标签，双层标签只动外层。
 # TX 出口：标准队列走 Function 的缺省端口；Custom 队列按描述符 fwd：DROP=0、CPU=3 不出 ETH，RSV=2 按 fwd_rsv 处理，
 # NORMAL=1 按 dport_type/dport_id 选口（eth_dport_type、dport_other）。RX 还比较接收队列：期望由参考模型
 # predict_rx_queue() 给出，缺省固定 0，与 VRX 样本的 local_qid（第 i 对的 RX 队列为 2i）比较；多对队列且 DUT 按 RSS
@@ -819,16 +824,17 @@ dpu_cmp.eth_agents: eth0                           # bind 进来的 eth agent �
 dpu_cmp.portid: 1                                  # 在各采样点上的订阅编号；同一采样点的其他消费者要用别的编号
 dpu_cmp.poll_ns: 10                                # 采样点空闲时的复查间隔（ns），>0
 dpu_cmp.sample_timeout_ns: 1000                    # 有积压时单次取样的超时上限（ns），>0
-dpu_cmp.rx_unknown: DPU_CMP_UNKNOWN_DROP           # RX 帧的 DMAC(+VLAN) 找不到 Function：DROP 只计数，REPORT 报 UVM_ERROR DPU_CMP_RX_UNKNOWN
+dpu_cmp.rx_unknown: DPU_CMP_UNKNOWN_DROP           # RX 帧的 DMAC 与归类 VLAN 找不到 Function：DROP 只计数，REPORT 报 UVM_ERROR DPU_CMP_RX_UNKNOWN
 dpu_cmp.rx_csum: DPU_CMP_CSUM_IGNORE               # VRX 的 DATA_VALID 期望：IGNORE 不比较；VALID 为 L4 校验和正确的 TCP/UDP 帧置位、其余清零；NONE 始终清零；只适用于标准队列
 dpu_cmp.port: 0                                    # 各 Function 的缺省出口端口（eth_agents 下标）
 dpu_cmp.min_frame: 60                              # TX 期望的最短帧长（不含 FCS），不足补零
 dpu_cmp.eth_dport_type: -1                         # Custom 描述符 dport_type 中表示 ETH 端口的编码，-1..7（越界 fatal）；等于它时 dport_id 即端口下标；-1 未配置（待 DUT 确认），NORMAL 一律走缺省端口
 dpu_cmp.dport_other: DPU_CMP_DPORT_NOT_ETH         # eth_dport_type 已配置时，NORMAL 但 dport_type 不是 ETH 编码（如 Host）的包：NOT_ETH 不出 ETH，DPU_CMP_DPORT_DEFAULT_PORT 走缺省端口
 dpu_cmp.fwd_rsv: DPU_CMP_RSV_REPORT                # fwd=RSV(2) 的包：REPORT 报 UVM_ERROR DPU_CMP_FWD_RSV，DPU_CMP_RSV_COUNT 只计数；都不登记期望
+dpu_cmp.eth_pvid: 1                                # ETH 口的缺省 VLAN，1..4094（驱动缺省 1）：ETH 收到的无标签帧归入它，发往 ETH 的帧 VLAN 等于它时去掉标签
+dpu_cmp.vlan_excess: DPU_CMP_VLAN_EXCESS_DROP      # 外层标签超过两层的异常帧（两向）：DROP 预期 DUT 丢弃、只计数；DPU_CMP_VLAN_EXCESS_REPORT 另报 UVM_ERROR DPU_CMP_VLAN_EXCESS；都不登记期望
 # 已删除：dpu_cmp.fwd_direct，不再读取（给了也不报错）；出口改按 fwd 的固定编码和上面三个参数判定。
-dpu_cmp.h0.pf0.mac: 0x020000000010                 # 示例；该 Function 的 MAC，RX 帧按 DMAC 找 Function；无缺省
-dpu_cmp.h0.pf0.vlan: 100                           # 示例；该 Function 收的 VLAN（12 位）；不给只收无 VLAN 帧
+# 已删除：dpu_cmp.hH.pfP[.vfV].mac / .vlan（给出即 fatal），改用第 2 节的 dpu.hH.pfP[.vfV].mac / .vlan.*。
 dpu_cmp.h0.pf0.port: 1                             # 示例；该 Function 的缺省出口端口，缺省取 dpu_cmp.port
 
 # -----------------------------------------------------------------------------
