@@ -37,6 +37,9 @@ class dpu_env_cfg extends uvm_object;
 	dpu_qsch_net_t		qsch_nets[string];
 	dpu_table_layout_t		table_layouts[dpu_table_kind_e];
 	dpu_function_policy_t	function_policies[string];
+	// Function L2 身份输入（键同 function_policies）：build 时由 dpu.hH.pfP[.vfV].mac / .vlan.* 读入，平台也可在
+	// publish 前直接改写；Tcl load_params 不重读。发布值见 frozen_l2。
+	dpu_function_l2_t		function_l2[string];
 	dpu_vio_policy_t		vio_policies[string];
 	dpu_msix_message_t		messages[$];
 	// 首次生成消息前保存SV显式catalog；运行期重新生成参数消息时不能把旧生成值误当显式项。
@@ -67,6 +70,8 @@ class dpu_env_cfg extends uvm_object;
 
 	dpu_table_layout_t		frozen_layouts[dpu_table_kind_e];
 	dpu_function_policy_t	frozen_functions[string];
+	// 每个快照 Function 一项：显式 MAC 或按 Host/vport 推导的 MAC，以及 PVID/优先级/trunk。
+	dpu_function_l2_t		frozen_l2[string];
 	dpu_vio_policy_t		frozen_policies[string];
 	string					frozen_reg_target;
 	dpu_bar_mapping_cfg_t	frozen_bar_groups[$];
@@ -135,6 +140,26 @@ class dpu_env_cfg extends uvm_object;
 	// 可选 pfvf（DUT pfvf_id，0..1023）与 PF 的 first_vf_offset（0..1023）只在存有路由策略的 Function 上有效，缺省 0，
 	// 不按拓扑推导编号。
 	extern protected function void load_function_routes();
+
+	// Function L2 身份：dpu.hH.pfP[.vfV].mac 与 .vlan.{pvid,pri,trunk}，build 时读一次，取值错误 fatal。
+	// 缺省 MAC 要用路由策略的 vport，到 publish 时才推导（平台可能在 load_params 之后改路由策略）。
+	extern protected function void load_function_l2();
+
+	// 单个 Function 的 L2 取值：MAC 非零单播（bit 40 为 0），PVID 1..4094，优先级 0..7，trunk 每项 1..4094、
+	// 互不相同且不含 PVID。
+	extern static function bit check_function_l2(
+		input dpu_function_l2_t	l2,
+		output string			why
+	);
+
+	// 发布用：每个快照 Function 一项；没显式给 mac 时按路由策略的 vport 推导（没有路由策略就没有 MAC），再检查取值，
+	// 以及全部 Host 上 MAC 互不相同。失败返回原因，不改 this。
+	extern protected function bit materialize_function_l2(
+		input dpu_device_snapshot	device,
+		input dpu_function_policy_t	policies[string],
+		output dpu_function_l2_t	effective[string],
+		output string				why
+	);
 
 	// Function 的参数路径 dpu.hH.pfP[.vfV]。
 	extern static function string function_param_path(input dpu_function_key_t	key);
@@ -316,6 +341,12 @@ class dpu_env_cfg extends uvm_object;
 		output dpu_function_record_t	record
 	);
 
+	// 已发布的 Function L2 身份（MAC、PVID、优先级、trunk）；未发布或未知 Function 返回 0。
+	extern function bit get_function_l2(
+		input dpu_function_key_t	key,
+		output dpu_function_l2_t	l2
+	);
+
 	// AF 额外资源只来自同一资源快照，不虚构 ring。
 	extern function void list_af_extra_queues(output dpu_af_extra_queue_binding_t records[$]);
 
@@ -476,6 +507,7 @@ function void dpu_env_cfg::load_params();
 			placement_cfg.msix_control_functions.push_back(device_cfg.functions[f].key);
 	end
 	load_function_routes();
+	load_function_l2();
 	if (driver_layouts) begin
 		use_driver_reference_layouts();
 	end
@@ -1378,6 +1410,129 @@ endfunction
 function string dpu_env_cfg::function_param_path(input dpu_function_key_t	key);
 	function_param_path = $sformatf("dpu.h%0d.pf%0d", key.host_id, key.pf_id);
 	if (key.kind == DPU_FUNCTION_VF) function_param_path = {function_param_path, $sformatf(".vf%0d", key.vf_id)};
+endfunction
+
+function void dpu_env_cfg::load_function_l2();
+	foreach (device_cfg.functions[f]) begin
+		dpu_function_key_t	owner;
+		dpu_function_l2_t	l2;
+		string				name;
+		string				path;
+		string				vpath;
+		string				why;
+
+		owner = device_cfg.functions[f].key;
+		name  = dpu_function_key_name(owner);
+		path  = function_param_path(owner);
+		vpath = {path, ".vlan"};
+		if (function_l2.exists(name)) l2 = function_l2[name];
+		else l2 = dpu_default_function_l2(owner);
+		begin
+			bit [47:0]	mac;
+			bit			given;
+
+			mac   = l2.mac;
+			given = 0;
+			`aip_int_opt(path, bit [47:0], mac, given)
+			if (given) begin
+				l2.mac       = mac;
+				l2.mac_given = 1;
+				l2.mac_valid = 1;
+			end
+		end
+		begin
+			int unsigned	pvid;
+			int unsigned	pri;
+			bit				given;
+
+			pvid  = l2.pvid;
+			pri   = l2.pri;
+			given = 0;
+			`aip_int_opt(vpath, int unsigned, pvid, given)
+			`aip_int_opt(vpath, int unsigned, pri, given)
+			l2.pvid = pvid;
+			l2.pri  = pri;
+		end
+		if (aip_cmdline_query::present(vpath, "trunk", 1)) begin
+			int unsigned	trunk[$];
+
+			`aip_int_queue(vpath, int unsigned, trunk, 0)
+			l2.trunk = trunk;
+		end
+		if (!check_function_l2(l2, why)) `uvm_fatal("PROJECT_CFG", why)
+		function_l2[name] = l2;
+	end
+endfunction
+
+function bit dpu_env_cfg::check_function_l2(
+	input dpu_function_l2_t	l2,
+	output string			why
+);
+	string	path;
+
+	path = function_param_path(l2.key);
+	why  = "";
+	if (l2.mac_valid && (l2.mac == 0 || l2.mac[40]))
+		why = $sformatf("%s.mac=%s must be a non-zero unicast MAC (bit 40 = 0)", path,
+						dpu_mac_string(l2.mac));
+	else if (l2.pvid < 1 || l2.pvid > 4094)
+		why = $sformatf("%s.vlan.pvid=%0d is outside 1..4094", path, l2.pvid);
+	else if (l2.pri > 7)
+		why = $sformatf("%s.vlan.pri=%0d is outside 0..7", path, l2.pri);
+	else
+		foreach (l2.trunk[i]) begin
+			if (l2.trunk[i] < 1 || l2.trunk[i] > 4094)
+				why = $sformatf("%s.vlan.trunk[%0d]=%0d is outside 1..4094", path, i, l2.trunk[i]);
+			else if (l2.trunk[i] == l2.pvid)
+				why = $sformatf("%s.vlan.trunk[%0d]=%0d repeats the PVID", path, i, l2.trunk[i]);
+			else
+				for (int j = 0; j < i; j++)
+					if (l2.trunk[j] == l2.trunk[i])
+						why = $sformatf("%s.vlan.trunk lists VLAN %0d twice", path, l2.trunk[i]);
+			if (why != "") break;
+		end
+	return why == "";
+endfunction
+
+function bit dpu_env_cfg::materialize_function_l2(
+	input dpu_device_snapshot	device,
+	input dpu_function_policy_t	policies[string],
+	output dpu_function_l2_t	effective[string],
+	output string				why
+);
+	dpu_function_key_t	keys[$];
+	string				owner_of[bit [47:0]];
+
+	effective.delete();
+	why = "";
+	device.list_functions(keys);
+	foreach (keys[i]) begin
+		dpu_function_l2_t	l2;
+		string				name;
+		string				path;
+
+		name = dpu_function_key_name(keys[i]);
+		path = function_param_path(keys[i]);
+		if (function_l2.exists(name)) l2 = function_l2[name];
+		else l2 = dpu_default_function_l2(keys[i]);
+		l2.key = keys[i];
+		if (!l2.mac_given) begin
+			l2.mac_valid = policies.exists(name);
+			l2.mac       = '0;
+			if (l2.mac_valid) l2.mac = dpu_default_function_mac(keys[i].host_id, policies[name].vport);
+		end
+		if (!check_function_l2(l2, why)) return 0;
+		if (l2.mac_valid) begin
+			if (owner_of.exists(l2.mac)) begin
+				why = $sformatf("%s and %s share MAC %s; give each Function its own %s.mac", owner_of[l2.mac],
+								path, dpu_mac_string(l2.mac), path);
+				return 0;
+			end
+			owner_of[l2.mac] = path;
+		end
+		effective[name] = l2;
+	end
+	return 1;
 endfunction
 
 function bit dpu_env_cfg::check_msix_pfvf(
@@ -3195,6 +3350,9 @@ function bit dpu_env_cfg::make_runtime_candidate(
 	candidate.messages                = authored_messages;
 	candidate.platform_controls       = platform_controls;
 	candidate.frozen_functions        = frozen_functions;
+	// L2 身份不随运行期重载变化：候选沿用输入与发布值，apply_runtime_candidate 不复制。
+	candidate.function_l2             = function_l2;
+	candidate.frozen_l2               = frozen_l2;
 	candidate.frozen_bar_groups       = frozen_bar_groups;
 	// 租约状态随候选走，候选上的 select_msix_scope 与发布后的选择一致。
 	candidate.msix_lease_resources    = msix_lease_resources;
@@ -3301,6 +3459,18 @@ function bit dpu_env_cfg::get_function(
 	return 1;
 endfunction
 
+function bit dpu_env_cfg::get_function_l2(
+	input dpu_function_key_t	key,
+	output dpu_function_l2_t	l2
+);
+	string	name;
+
+	name = dpu_function_key_name(key);
+	if (!frozen_l2.exists(name)) return 0;
+	l2 = frozen_l2[name];
+	return 1;
+endfunction
+
 function void dpu_env_cfg::list_af_extra_queues(output dpu_af_extra_queue_binding_t records[$]);
 	records.delete();
 	if (resource_snapshot != null) resource_snapshot.list_af_extra_queue_bindings(records);
@@ -3391,6 +3561,7 @@ function bit dpu_env_cfg::publish(
 );
 	dpu_bar_mapping_cfg_t	groups[$];
 	dpu_env_cfg				candidate;
+	dpu_function_l2_t		l2[string];
 
 	why = "publication requires frozen device/resources/BAR map";
 	if (device == null || resources == null || map == null) return 0;
@@ -3486,7 +3657,8 @@ function bit dpu_env_cfg::publish(
 		end
 	end
 	if (!check_msix_pfvf(candidate.messages, function_policies, why) ||
-		!check_msix_globals(candidate.messages, resources, why))
+		!check_msix_globals(candidate.messages, resources, why) ||
+		!materialize_function_l2(device, function_policies, l2, why))
 		return 0;
 	// 此后没有可能失败的分支；一起发布身份、生成消息和公共表冻结值。
 	device_snapshot      = device;
@@ -3498,6 +3670,7 @@ function bit dpu_env_cfg::publish(
 	frozen_messages      = candidate.messages;
 	frozen_layouts       = table_layouts;
 	frozen_functions     = function_policies;
+	frozen_l2            = l2;
 	frozen_policies      = vio_policies;
 	frozen_reg_target    = reg_target;
 	frozen_bar_groups    = groups;

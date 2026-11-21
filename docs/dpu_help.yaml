@@ -131,6 +131,14 @@ dpu.h0.pf0.vf0.intel_vf: 0                         # 示例；Intel VF 编号 0.
 dpu.h0.pf0.vf0.vport: 1                            # 示例；VF vport 0..1023
 dpu.h0.pf0.vf0.bdf_index: 1                        # 示例；VF 的 BDF 表索引 0..127，缺省等于 vport
 dpu.h0.pf0.vf0.pfvf: 1                             # 示例；VF 的 DUT pfvf_id 0..1023，缺省 0；与所属 PF 的 pfvf/first_vf_offset 的关系由平台 validator 核对
+# Function L2 身份（AF 给每个 Function 分配的 MAC 与 VLAN；build 时读取，Tcl load_params 不重读）：publish 时补齐缺省、
+# 检查取值与 MAC 唯一，平台经 dpu_env_cfg::get_function_l2 查发布值，作为各项目取 Function MAC/VLAN 的唯一来源。
+# DUT 一条路径最多处理两层 VLAN 标签（外层 S-tag + 内层 C-tag），这里只配入口 PVID 与 trunk；三层及以上是异常路径，
+# 由比对模型处理。
+dpu.h0.pf0.mac: 0x020000000001                     # 示例；该 Function 的 MAC，非零单播；缺省 02:00:00:<Host 低 8 位>:<vport 16 位>，没有路由策略的 Function 没有缺省 MAC；全部 Host 上不能重复，publish 时检查
+dpu.h0.pf0.vlan.pvid: 1                            # 缺省 VLAN（PVID）1..4094，缺省 1（驱动 DPU_DEFAULT_VLAN_ID）：无标签帧归入它，出口 VLAN 等于它时去掉标签
+dpu.h0.pf0.vlan.pri: 0                             # PVID 的优先级 0..7：无标签帧需要补标签时用作 PCP
+dpu.h0.pf0.vlan.trunk: 100,200                     # 示例；另外允许带标签收发的 VLAN（列表语法），每项 1..4094、互不相同且不含 pvid，缺省空；成员 VLAN = pvid 加 trunk
 
 # -----------------------------------------------------------------------------
 # 3 DUT 能力上限（dpu_common：dpu_dut_caps，路径 dpu.caps）

@@ -210,6 +210,63 @@ typedef struct {
 	bit					vdpa;
 } dpu_function_policy_t;
 
+// 每 Function 的 L2 身份：AF 给 Function 分配的 MAC 与 VLAN（缺省 VLAN 即 PVID，驱动缺省 1）。成员 VLAN = PVID ∪ trunk。
+// DUT 一条路径最多处理两层标签（外层 S-tag + 内层 C-tag），三层及以上是异常路径，不在 Function 配置里描述。
+typedef struct {
+	dpu_function_key_t	key;
+	// 0：没有路由策略（没有 vport）又没显式给 mac 的 Function，没有 MAC。
+	bit					mac_valid;
+	// 1：显式给出 dpu.hH.pfP[.vfV].mac；否则发布时按 Host/vport 推导（dpu_default_function_mac）。
+	bit					mac_given;
+	bit [47:0]			mac;
+	int unsigned		pvid;
+	int unsigned		pri;
+	int unsigned		trunk[$];
+} dpu_function_l2_t;
+
+// L2 缺省值：没有 MAC（发布时按 Host/vport 推导）、PVID 1、优先级 0、trunk 为空。
+function automatic dpu_function_l2_t dpu_default_function_l2(input dpu_function_key_t	key);
+	dpu_function_l2_t	value;
+
+	value.key       = key;
+	value.mac_valid = 0;
+	value.mac_given = 0;
+	value.mac       = '0;
+	value.pvid      = 1;
+	value.pri       = 0;
+	value.trunk.delete();
+	return value;
+endfunction
+
+// 缺省 MAC：本地管理单播 02:00:00，后接 Host 号低 8 位与 vport 低 16 位。
+function automatic bit [47:0] dpu_default_function_mac(input int unsigned	host_id,
+													   input int unsigned	vport);
+	return {8'h02, 8'h00, 8'h00, host_id[7:0], vport[15:0]};
+endfunction
+
+// VID 是否为该 Function 的成员（PVID 或 trunk 中的一项）。
+function automatic bit dpu_vlan_member(input dpu_function_l2_t	l2, input int unsigned	vid);
+	if (vid == l2.pvid) return 1;
+	foreach (l2.trunk[i])
+		if (l2.trunk[i] == vid) return 1;
+	return 0;
+endfunction
+
+// 日志用的 VLAN 列表文本（逗号分隔的十进制，空列表为 none）。
+function automatic string dpu_vlan_list_string(input int unsigned	vids[$]);
+	string	text;
+
+	text = "";
+	foreach (vids[i]) text = {text, (i == 0) ? "" : ",", $sformatf("%0d", vids[i])};
+	return (text == "") ? "none" : text;
+endfunction
+
+// 日志用的 MAC 文本 xx:xx:xx:xx:xx:xx。
+function automatic string dpu_mac_string(input bit [47:0]	mac);
+	return $sformatf("%02x:%02x:%02x:%02x:%02x:%02x", mac[47:40], mac[39:32], mac[31:24], mac[23:16],
+					 mac[15:8], mac[7:0]);
+endfunction
+
 // ctx 保存真实访问目标和整个操作范围；仅冻结视图生成，checked helper 再核对原件。
 typedef struct {
 	dpu_device_snapshot	snapshot;
