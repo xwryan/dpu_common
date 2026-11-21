@@ -10,8 +10,8 @@
 # vio_tx.count、vio_rx_refill.qid）只是 Tcl 命令参数的记法，在命令行上写成 vio_tx count=100。
 #
 # 对应代码：各仓库的以下提交（2026-11-21；带 * 的是尚未推送到 GitHub 的本地提交）。
-#   aip_core 6211ce9       dpu_common 91d48a2*   host_mem 557af36     pcie_work a61b86c      inter_pcie fd36553
-#   net_packet 7dd10da     virtio_work 05bb0c8   rdma_work e4f9743*   eth_seg_agent 5b7fdb0  dpu_queue_work 5648732
+#   aip_core 6211ce9       dpu_common 91d48a2    host_mem 557af36     pcie_work a61b86c      inter_pcie fd36553
+#   net_packet 7dd10da     virtio_work 05bb0c8   rdma_work b6e1637    eth_seg_agent c24bb7e  dpu_queue_work 5648732
 #   flow_control 2b58bce
 # host_mem 由第 9 节的 dpu.mem_* 配置，自身不读参数；flow_control 不读参数；simflow 是运行流程工具，不在本文范围。
 #
@@ -838,7 +838,7 @@ top.compare_type: dpu_top_cmp                      # 示例；factory 类型名�
 # NORMAL=1 按 dport_type/dport_id 选口（eth_dport_type、dport_other）。RX 还比较接收队列：期望由参考模型
 # predict_rx_queue() 给出，缺省固定 0，与 VRX 样本的 local_qid（第 i 对的 RX 队列为 2i）比较；多对队列且 DUT 按 RSS
 # 等规则分流时，须派生 dpu_cmp_rm 覆写它，否则报 mismatch。
-dpu_cmp.eth_agents: eth0                           # bind 进来的 eth agent 名列表（逗号分隔），下标即端口号；没 bind 的名字打一行 info 后跳过
+dpu_cmp.eth_agents: eth0                           # bind 进来的 eth agent 名列表（逗号分隔），下标即端口号；没 bind 的名字打一行 info 后跳过；rdma_work 示例给 eth0,eth1,eth2,eth3
 dpu_cmp.portid: 1                                  # 在各采样点上的订阅编号；同一采样点的其他消费者要用别的编号
 dpu_cmp.poll_ns: 10                                # 采样点空闲时的复查间隔（ns），>0
 dpu_cmp.sample_timeout_ns: 1000                    # 有积压时单次取样的超时上限（ns），>0
@@ -887,19 +887,23 @@ eth0.loopback: 0                                   # TX→RX 原样回环，仅 
 
 # SimFlow SHM 联仿（可选 add-on：编 eth_seg_agent_shm.f 与 shm_work，见 eth_seg_agent 的 docs/integration/shm.md）。shm 在 build
 #   读一次；其余在 SHM 链路 build 时读一次，不合法即 fatal（ETH_SHM_CFG）。SHM 传输参数（+SHM_*）与节点脚本前的 shm_wait_ready
-#   由 SimFlow def_shm_cosim 生成，不手写；一个仿真只能有一个 shm=1 的 agent。
+#   由 SimFlow def_shm_cosim 生成，不手写。一个仿真可以有多个 shm=1 的 agent（如 DUT 的 eth0..eth3），共用本进程唯一的 SHM 端口：
+#   每帧带链路名，对端交给同名的链路，收到本端没有的链路名即 ETH_SHM_LINK fatal；一个节点只连一个对端节点。除 shm_link 外的
+#   shm_* 都是节点级参数，各 shm=1 agent 必须相同（不同即 ETH_SHM_CFG fatal），用叶名（+shm_max_frame=8176）一次给全部 agent。
 eth0.shm: 0                                        # 1=TX 整帧进 SHM fabric、对端的帧经 rx_driver 注入；只允许 ETH_SEG_MAC + UVM_ACTIVE，与 loopback 互斥；没编 eth_seg_shm_pkg 时报 ETH_AGENT_SHM
-eth0.shm_queue_depth: 256                          # 各级 SHM 队列与解码队列深度，>0；满即 fatal（没有反压）
-eth0.shm_max_frame: 2032                           # 含 FCS 的最大帧长，1..16368 且 ≤ fabric slot_size-16；MTU 4096 用 8176（slot_size 8192）
-eth0.shm_tx_timeout_ms: 1000                       # fabric 满或对端暂停时单帧发送重试的墙钟上限（ms，每次重试睡 1ms），>0，超时 fatal
-eth0.shm_idle_sleep_us: 0                          # 接收空闲时每次轮询（仿真时间 100ns）在宿主侧休眠的微秒数，<1000000；限制空闲一方的仿真时间推进
-eth0.shm_wait_poll_ns: 1                           # eth_shm_wait 每次轮询推进的仿真时间（ns），>0；等待期间 endpoint 也按它轮询
-eth0.shm_wait_sleep_us: 1000                       # eth_shm_wait 每次轮询在宿主侧休眠的微秒数，<1000000
-eth0.shm_wait_timeout_ms: 600000                   # eth_shm_wait 不给 timeout_ms 时的墙钟上限（ms），>0
-# 两个仿真之间的带内控制信号（同一条 SHM 链路，不交给 DUT）：eth_shm_signal name=<名字> [data=<可打印文本，≤1000 字符>] 返回
+eth0.shm_link: eth0                                # 缺省 agent 叶名；本链路的名字，与对端同名的链路相连，本仿真内唯一，1..64 个字母、数字或 _ . -；要按 agent 路径给（叶名会让所有 agent 同名）
+eth0.shm_queue_depth: 256                          # 节点级；各级 SHM 队列、每条链路的解码队列与未取走控制信号的上限，>0 且不小于链路数；满即 fatal（没有反压）
+eth0.shm_max_frame: 2032                           # 节点级；每帧 SHM 载荷上限 = 链路头（3 + 链路名长度）+ 含 FCS 的以太网帧，1..16368 且 ≤ fabric slot_size-16；MTU 4096 用 8176（slot_size 8192）
+eth0.shm_tx_timeout_ms: 1000                       # 节点级；fabric 满或对端暂停时单帧发送重试的墙钟上限（ms，每次重试睡 1ms），>0，超时 fatal
+eth0.shm_idle_sleep_us: 0                          # 节点级；接收空闲时每次轮询（仿真时间 100ns）在宿主侧休眠的微秒数，<1000000；限制空闲一方的仿真时间推进
+eth0.shm_wait_poll_ns: 1                           # 节点级；eth_shm_wait 每次轮询推进的仿真时间（ns），>0；等待期间 endpoint 也按它轮询
+eth0.shm_wait_sleep_us: 1000                       # 节点级；eth_shm_wait 每次轮询在宿主侧休眠的微秒数，<1000000
+eth0.shm_wait_timeout_ms: 600000                   # 节点级；eth_shm_wait 不给 timeout_ms 时的墙钟上限（ms），>0
+eth0.shm_link_check: 0                             # 节点级；1=就绪后与对端交换并核对链路名集合，不一致在开始时即 ETH_SHM_LINKS fatal；两端都要开
+# 两个仿真之间的带内控制信号（属于节点，与链路数无关，不交给 DUT）：eth_shm_signal name=<名字> [data=<可打印文本，≤1000 字符>] 返回
 #   "OK: eth_shm_signal: <名字>"；eth_shm_wait name=<名字> [timeout_ms=<毫秒>] 墙钟等对端的同名信号，返回 "OK: eth_shm_wait: <数据>"，
 #   超时为 "ERROR: eth_shm_wait: no '<名字>' signal from the peer within <n> ms ..."。信号按名字排队，先到的不丢；没有 shm=1 的链路
-#   时两条命令都返回 ERROR。rdma_work 的两个启动脚本用 rx_ready/rx_done/tx_done 做握手与结束前互等。
+#   时两条命令都返回 ERROR。rdma_work 的两个启动脚本用 tx_hello/rx_ready/tx_done/rx_done 做两步握手与结束前互等。
 
 # AIP 发包命令（示例包 eth_seg_aip_pkg / eth_net_packet_aip_pkg，宏映射 eth0..eth3，按 AGENT_NAME 增删）：
 #   <agent>_send / <agent>_net_send count=N（缺省 1，须 ≥1）或 time=T（到期 kill）。
@@ -1059,14 +1063,16 @@ VIRTIO_COMPLETION_MODE: MSIX                       # MSIX 或 POLLING（也认�
 #   先取 ::rdma_data_mode，再取 +rdma.traffic.data_mode，都没有时设为 FIXED,INCREMENT；只允许 FIXED/INCREMENT，其他值在发任何命令前
 #   报错。这条路径只用一个 Function、一个 QP。
 # RDMA 两个仿真对打（SimFlow SHM 联仿，参考 rdma_work 的 integration/project/example/shm）：接收端设 ::rdma_rx_peer 1 后 source
-#   rdma_rx_start.tcl，发送端 source rdma_tx_peer_start.tcl，两端的 eth0 都是 shm=1，各自只配自己的 dpu.hH.pfP.mac/.ip（两个仿真
-#   都是 h0.pf0 时须各给一个，相同时报 RDMA_DMAC_SELF/RDMA_DIP_SELF）。缺省两步握手：发送端 rdma_hello 后 eth_shm_signal
+#   rdma_rx_start.tcl，发送端 source rdma_tx_peer_start.tcl，两端接到对端的 eth 口都是 MAC active + shm=1（单 vport 示例只开 eth0），
+#   各自只配自己的 dpu.hH.pfP.mac/.ip（两个仿真都是 h0.pf0 时须各给一个，相同时报 RDMA_DMAC_SELF/RDMA_DIP_SELF）。缺省两步握手：发送端 rdma_hello 后 eth_shm_signal
 #   name=tx_hello（Function、MAC、IPv4、QPN 段起点 first_qpn、QP 数 qp_count）；接收端 eth_shm_wait 拿到后作为 rdma_run rx_only=1 的
 #   hello=（补齐 dest_qpn/dmac/dst_ip/peer_qps，预先给了的须一致），建好 QP、投好 RECV 后 eth_shm_signal name=rx_ready（结果行，含
 #   本端 dmac/dst_ip，缺 src_qpn 时补上）；发送端核对 src_qpn/tx_qps 与通告一致后以 local_qpn=<first_qpn> 原样接在 rdma_run tx_peer=1
 #   后面；发完、收齐后互发 tx_done/rx_done 再 end_test（先结束的一端会关掉 SHM 端口）。多 QP：两端各给自己的 ::rdma_qps
-#   （rdma.run.qps），接收端另可给 ::rdma_flows。多个 vport：::rdma_f0 写成列表（{0 1} 或 0,1，节点参数 rdma.run.f0: "0,1"），一条
-#   rdma_run 带全部 vport，各 vport 走自己的 eth 口，按位置与对端配对；按 vport 的变量给一个值或同样长的列表。::rdma_shm_handshake 0
+#   （rdma.run.qps），接收端另可给 ::rdma_flows。多个 vport：::rdma_f0 写成列表（{0 1} 或 0,1，节点参数 rdma.run.f0: "0,1,2,3"），一条
+#   rdma_run 带全部 vport，按位置与对端配对；按 vport 的变量给一个值或同样长的列表。示例 rdma_rc_mvport：每个节点 Host 0 的 4 个 PF
+#   是 4 个 vport，第 K 个的 RC 走 ethK（rdma.h0.pfK.route.dst_port: K），eth0..eth3 都 shm=1，共用一个 SHM 端口、按链路名（缺省
+#   agent 名）与对端同名的口相连，节点级 shm_* 用叶名，shm_link_check: 1 两端开始时核对链路名集合。::rdma_shm_handshake 0
 #   关掉握手（两端事先约定全部字段：发送端 ::rdma_dest_qpn/::rdma_dmac/::rdma_dst_ip 或 ::rdma_rx_fields，接收端 ::rdma_dest_qpn/
 #   ::rdma_dmac/::rdma_dst_ip）。
 # 快照恢复：aip_restore → 重新 source AIP 加载脚本 → load_params → dut_config。恢复后参数宏改读本次 simv 的 plusarg，
