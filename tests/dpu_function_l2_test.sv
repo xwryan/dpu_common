@@ -1,5 +1,5 @@
-// Function L2 身份测试：dpu.hH.pfP[.vfV].mac / .vlan.* 的缺省推导、参数覆盖、取值检查、发布时的 MAC 唯一性与失败原子性；
-// 以及 vport 的自动分配与全设备唯一（DUT 的 global Function ID）。
+// Function L2 身份测试：dpu.hH.pfP[.vfV].mac / .ip / .vlan.* 的缺省推导、参数覆盖、取值检查、发布时的 MAC/IPv4 唯一性与
+// 失败原子性；以及 vport 的自动分配与全设备唯一（DUT 的 global Function ID）。
 // 两个 Host、各两个 PF、每 PF 一个 VF；用正式 resolver 与 BAR map 发布，不分配 ring、不访问 DUT。
 module dpu_function_l2_test;
 	import uvm_pkg::*;
@@ -82,7 +82,7 @@ module dpu_function_l2_test;
 		return l2;
 	endfunction
 
-	// 缺省：有路由策略的 Function 按 Host/vport 推导 MAC；没有路由策略的没有 MAC，
+	// 缺省：有路由策略的 Function 按 Host/vport 推导 MAC 与 IPv4；没有路由策略的两者都没有，
 	// 也不参与唯一性检查；PVID 1、优先级 0、trunk 为空。发布前和未知 Function 查不到。
 	function automatic void test_defaults();
 		dpu_env_cfg				cfg;
@@ -103,18 +103,30 @@ module dpu_function_l2_test;
 			k    = cfg.device_cfg.functions[f].key;
 			name = dpu_function_key_name(k);
 			l2   = l2_of(cfg, k);
-			check(l2.pvid == 1 && l2.pri == 0 && l2.trunk.size() == 0 && !l2.mac_given,
+			check(l2.pvid == 1 && l2.pri == 0 && l2.trunk.size() == 0 && !l2.mac_given && !l2.ip_given,
 				  {name, ": default VLAN must be PVID 1, priority 0, no trunk"});
-			if (cfg.function_policies.exists(name))
+			if (cfg.function_policies.exists(name)) begin
 				check(l2.mac_valid && l2.mac == dpu_default_function_mac(k.host_id, cfg.function_policies[name].vport),
 					  $sformatf("%s: derived MAC %s", name, dpu_mac_string(l2.mac)));
+				check(l2.ip_valid && l2.ip == dpu_default_function_ip(k.host_id, cfg.function_policies[name].vport),
+					  $sformatf("%s: derived IPv4 %s", name, dpu_ipv4_string(l2.ip)));
+			end
 			else
-				check(!l2.mac_valid && l2.mac == 0, {name, ": a Function without route policy has no MAC"});
+				check(!l2.mac_valid && l2.mac == 0 && !l2.ip_valid && l2.ip == 0,
+					  {name, ": a Function without route policy has no MAC and no IPv4"});
 		end
 		l2 = l2_of(cfg, key(1, 1));
 		check(l2.mac == 48'h02_00_00_01_00_50, "h1.pf1 MAC must be 02:00:00:01:00:50 (vport 80)");
+		check(dpu_ipv4_string(l2.ip) == "10.1.0.81", {"h1.pf1 IPv4 must be 10.1.0.81 (vport 80), got ",
+													  dpu_ipv4_string(l2.ip)});
 		l2 = l2_of(cfg, key(0, 1, 0));
 		check(l2.mac == 48'h02_00_00_00_00_11, "h0.pf1.vf0 MAC must be 02:00:00:00:00:11");
+		check(l2.ip == 32'h0a_00_00_12, "h0.pf1.vf0 IPv4 must be 10.0.0.18 (vport 17)");
+		l2 = l2_of(cfg, key(0, 0));
+		check(l2.ip == 32'h0a_00_00_01, "h0.pf0 IPv4 must be 10.0.0.1 (vport 0)");
+		// vport+1 的高 8 位进第三段：vport 255 → 10.<Host>.1.0。
+		check(dpu_default_function_ip(2, 255) == 32'h0a_02_01_00 && dpu_default_function_ip(0, 1023) == 32'h0a_00_04_00,
+			  "default IPv4 must carry vport+1 in the low 16 bits");
 		check(!cfg.get_function_l2(key(5, 0), l2), "unknown Function returned an L2 record");
 		$display("L2 defaults passed");
 	endfunction
@@ -128,7 +140,8 @@ module dpu_function_l2_test;
 		dpu_function_l2_t		l2;
 		string					why;
 		string					keys[$] = '{"dpu.h0.pf1.mac", "dpu.h0.pf1.vlan.pvid", "dpu.h0.pf1.vlan.pri",
-											"dpu.h0.pf1.vlan.trunk", "dpu.h1.pf1.vf0.mac", "dpu.h0.pf0.vf0.vlan.trunk"};
+											"dpu.h0.pf1.vlan.trunk", "dpu.h1.pf1.vf0.mac", "dpu.h0.pf0.vf0.vlan.trunk",
+											"dpu.h0.pf1.ip", "dpu.h1.pf1.vf0.ip", "dpu.h1.pf0.ip"};
 
 		aip_cmdline_override::set_val("dpu.h0.pf1.mac", "0x0a0b0c0d0e10");
 		aip_cmdline_override::set_val("dpu.h0.pf1.vlan.pvid", "10");
@@ -136,6 +149,10 @@ module dpu_function_l2_test;
 		aip_cmdline_override::set_val("dpu.h0.pf1.vlan.trunk", "20,30");
 		aip_cmdline_override::set_val("dpu.h1.pf1.vf0.mac", "0x020000aabbcc");
 		aip_cmdline_override::set_val("dpu.h0.pf0.vf0.vlan.trunk", "4094");
+		// IPv4 点分与数值两种写法；空值保持缺省。
+		aip_cmdline_override::set_val("dpu.h0.pf1.ip", "192.168.1.10");
+		aip_cmdline_override::set_val("dpu.h1.pf1.vf0.ip", "0x0a0b0c0d");
+		aip_cmdline_override::set_val("dpu.h1.pf0.ip", "");
 		cfg = make_cfg("overrides", 0);
 		foreach (keys[i]) aip_cmdline_override::clear(keys[i]);
 		resolve(cfg, device, resources, map);
@@ -147,14 +164,19 @@ module dpu_function_l2_test;
 						l2.pri, l2.trunk));
 		check(dpu_vlan_member(l2, 10) && dpu_vlan_member(l2, 30) && !dpu_vlan_member(l2, 1),
 			  "membership must be PVID plus trunk");
+		check(l2.ip_valid && l2.ip_given && dpu_ipv4_string(l2.ip) == "192.168.1.10",
+			  {"h0.pf1 dotted IPv4 override: ", dpu_ipv4_string(l2.ip)});
 		l2 = l2_of(cfg, key(1, 1, 0));
 		check(l2.mac_valid && l2.mac_given && l2.mac == 48'h02_00_00_aa_bb_cc,
 			  "explicit MAC on a Function without route policy");
+		check(l2.ip_valid && l2.ip_given && l2.ip == 32'h0a0b0c0d, "numeric IPv4 on a Function without route policy");
+		l2 = l2_of(cfg, key(1, 0));
+		check(!l2.ip_given && l2.ip == dpu_default_function_ip(1, 64), "an empty ip keeps the derived IPv4");
 		l2 = l2_of(cfg, key(0, 0, 0));
 		check(l2.pvid == 1 && l2.trunk.size() == 1 && l2.trunk[0] == 4094, "h0.pf0.vf0 trunk 4094");
 		l2 = l2_of(cfg, key(0, 0));
-		check(!l2.mac_given && l2.mac == 48'h02_00_00_00_00_00 && l2.trunk.size() == 0,
-			  "a PF override must not leak to other Functions");
+		check(!l2.mac_given && l2.mac == 48'h02_00_00_00_00_00 && l2.trunk.size() == 0 && !l2.ip_given &&
+			  l2.ip == 32'h0a_00_00_01, "a PF override must not leak to other Functions");
 		$display("L2 overrides passed");
 	endfunction
 
@@ -178,6 +200,36 @@ module dpu_function_l2_test;
 		check(!dpu_env_cfg::check_function_l2(l2, why) && uvm_is_match("*dpu.h0.pf0.mac*", why), "zero MAC accepted");
 		l2 = base; l2.mac_valid = 0; l2.mac = '0;
 		check(dpu_env_cfg::check_function_l2(l2, why), {"Function without MAC rejected: ", why});
+		// IPv4：0.0.0.0、广播、127/8 与 224/4 不能用；没有 IPv4 的 Function 不查。
+		l2 = base; l2.ip_valid = 1; l2.ip = 32'h0a_00_00_01;
+		check(dpu_env_cfg::check_function_l2(l2, why), {"valid IPv4 rejected: ", why});
+		begin
+			bit [31:0]	bad[6] = '{32'h0, 32'hffff_ffff, 32'h7f_00_00_01, 32'h7f_ff_ff_fe, 32'he0_00_00_01, 32'hef_ff_ff_ff};
+
+			foreach (bad[i]) begin
+				l2 = base; l2.ip_valid = 1; l2.ip = bad[i];
+				check(!dpu_env_cfg::check_function_l2(l2, why) &&
+					  uvm_is_match({"*dpu.h0.pf0.ip=", dpu_ipv4_string(bad[i]), " is not a usable unicast IPv4*"}, why),
+					  {"reserved IPv4 accepted: ", dpu_ipv4_string(bad[i]), " / ", why});
+			end
+		end
+		l2 = base; l2.ip_valid = 1; l2.ip = 32'hdf_ff_ff_ff;
+		check(dpu_env_cfg::check_function_l2(l2, why), {"IPv4 223.255.255.255 rejected: ", why});
+		l2 = base; l2.ip_valid = 0; l2.ip = '0;
+		check(dpu_env_cfg::check_function_l2(l2, why), {"Function without IPv4 rejected: ", why});
+		begin
+			bit [31:0]	ip;
+			string		texts[5] = '{"10.0.0.256", "10.0.0", "1.2.3.4.5", "10.0.x.1", "10..0.1"};
+
+			ip = 32'h01020304;
+			check(dpu_env_cfg::parse_ipv4_text(" 172 . 16.0.9", ip, why) && ip == 32'hac_10_00_09,
+				  {"dotted IPv4 with spaces rejected: ", why});
+			foreach (texts[i]) begin
+				ip = 32'h01020304;
+				check(!dpu_env_cfg::parse_ipv4_text(texts[i], ip, why) && ip == 32'h01020304,
+					  {"malformed IPv4 accepted or changed the value: ", texts[i]});
+			end
+		end
 		l2 = base; l2.pvid = 0;
 		check(!dpu_env_cfg::check_function_l2(l2, why) && uvm_is_match("*vlan.pvid=0*", why), "PVID 0 accepted");
 		l2 = base; l2.pvid = 4095;
@@ -226,6 +278,30 @@ module dpu_function_l2_test;
 		resolve(cfg, device, resources, map);
 		check(!cfg.publish(device, resources, map, why) && uvm_is_match("*share MAC 02:00:00:12:34:56*", why) &&
 			  uvm_is_match("*dpu.h1.pf1.vf0*", why), {"PF/VF duplicate MAC published: ", why});
+
+		// IPv4 同样在全部 Host 上唯一：两个显式值相同，或显式值撞上别的 Function 的推导值。
+		cfg = make_cfg("dup_ip", 1);
+		pf  = dpu_function_key_name(key(0, 1));
+		vf  = dpu_function_key_name(key(1, 0, 0));
+		cfg.function_l2[pf].ip       = 32'h0a_09_09_09;
+		cfg.function_l2[pf].ip_given = 1;
+		cfg.function_l2[pf].ip_valid = 1;
+		cfg.function_l2[vf].ip       = 32'h0a_09_09_09;
+		cfg.function_l2[vf].ip_given = 1;
+		cfg.function_l2[vf].ip_valid = 1;
+		resolve(cfg, device, resources, map);
+		check(!cfg.publish(device, resources, map, why) &&
+			  uvm_is_match("dpu.h0.pf1 and dpu.h1.pf0.vf0 share IPv4 10.9.9.9; give each Function its own dpu.h1.pf0.vf0.ip", why),
+			  {"duplicate explicit IPv4 published: ", why});
+
+		cfg = make_cfg("dup_ip_derived", 1);
+		pf  = dpu_function_key_name(key(1, 1));
+		cfg.function_l2[pf].ip       = dpu_default_function_ip(0, 0);
+		cfg.function_l2[pf].ip_given = 1;
+		cfg.function_l2[pf].ip_valid = 1;
+		resolve(cfg, device, resources, map);
+		check(!cfg.publish(device, resources, map, why) && uvm_is_match("dpu.h0.pf0 and dpu.h1.pf1 share IPv4 10.0.0.1*", why),
+			  {"explicit IPv4 equal to a derived IPv4 published: ", why});
 
 		cfg = make_cfg("dup_vport", 1);
 		cfg.function_policies[dpu_function_key_name(key(0, 1))].vport = 0;
@@ -318,6 +394,7 @@ module dpu_function_l2_test;
 		l2 = l2_of(cfg, key(1, 0));
 		check(l2.mac == 48'h02_00_00_01_00_01, $sformatf("h1.pf0 default MAC %s, expected 02:00:00:01:00:01",
 														 dpu_mac_string(l2.mac)));
+		check(dpu_ipv4_string(l2.ip) == "10.1.0.2", {"h1.pf0 default IPv4 ", dpu_ipv4_string(l2.ip), ", expected 10.1.0.2"});
 
 		// h0.pf0 显式 1、h1.pf1 显式 0；h0.pf1、h1.pf0 自动取 2、3。h1.pf0 显式给的 bdf_index 7 不跟 vport。
 		keys = '{"dpu.h0.pf0.vport", "dpu.h0.pf1.requester", "dpu.h0.pf1.intel_pf", "dpu.h0.pf1.intel_vf",
@@ -382,6 +459,17 @@ module dpu_function_l2_test;
 		aip_cmdline_override::clear("dpu.h0.pf1.vlan.pvid");
 		check(catcher.caught == 3 && uvm_is_match("*dpu.h0.pf1.vlan.pvid=4095*", catcher.last),
 			  $sformatf("PVID 4095: caught=%0d %s", catcher.caught, catcher.last));
+		aip_cmdline_override::set_val("dpu.h0.pf0.ip", "10.0.0.300");
+		cfg = make_cfg("bad_ip_text", 0);
+		aip_cmdline_override::clear("dpu.h0.pf0.ip");
+		check(catcher.caught == 4 && uvm_is_match("dpu.h0.pf0.ip=10.0.0.300: IPv4 octet '300' is not a decimal 0..255",
+												  catcher.last),
+			  $sformatf("malformed IPv4: caught=%0d %s", catcher.caught, catcher.last));
+		aip_cmdline_override::set_val("dpu.h0.pf1.ip", "127.0.0.1");
+		cfg = make_cfg("bad_ip_loopback", 0);
+		aip_cmdline_override::clear("dpu.h0.pf1.ip");
+		check(catcher.caught == 5 && uvm_is_match("*dpu.h0.pf1.ip=127.0.0.1 is not a usable unicast IPv4*", catcher.last),
+			  $sformatf("loopback IPv4: caught=%0d %s", catcher.caught, catcher.last));
 		uvm_report_cb::delete(null, catcher);
 		$display("L2 parameter errors passed");
 	endfunction

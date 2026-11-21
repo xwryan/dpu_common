@@ -37,7 +37,7 @@ class dpu_env_cfg extends uvm_object;
 	dpu_qsch_net_t		qsch_nets[string];
 	dpu_table_layout_t		table_layouts[dpu_table_kind_e];
 	dpu_function_policy_t	function_policies[string];
-	// Function L2 身份输入（键同 function_policies）：build 时由 dpu.hH.pfP[.vfV].mac / .vlan.* 读入，平台也可在
+	// Function L2 身份输入（键同 function_policies）：build 时由 dpu.hH.pfP[.vfV].mac / .ip / .vlan.* 读入，平台也可在
 	// publish 前直接改写；Tcl load_params 不重读。发布值见 frozen_l2。
 	dpu_function_l2_t		function_l2[string];
 	dpu_vio_policy_t		vio_policies[string];
@@ -70,7 +70,7 @@ class dpu_env_cfg extends uvm_object;
 
 	dpu_table_layout_t		frozen_layouts[dpu_table_kind_e];
 	dpu_function_policy_t	frozen_functions[string];
-	// 每个快照 Function 一项：显式 MAC 或按 Host/vport 推导的 MAC，以及 PVID/优先级/trunk。
+	// 每个快照 Function 一项：显式或按 Host/vport 推导的 MAC 与 IPv4，以及 PVID/优先级/trunk。
 	dpu_function_l2_t		frozen_l2[string];
 	dpu_vio_policy_t		frozen_policies[string];
 	string					frozen_reg_target;
@@ -143,15 +143,22 @@ class dpu_env_cfg extends uvm_object;
 	// 不按拓扑推导编号。
 	extern protected function void load_function_routes();
 
-	// Function L2 身份：dpu.hH.pfP[.vfV].mac 与 .vlan.{pvid,pri,trunk}，build 时读一次，取值错误 fatal。
-	// 缺省 MAC 要用路由策略的 vport，到 publish 时才推导（平台可能在 load_params 之后改路由策略）。
+	// Function L2 身份：dpu.hH.pfP[.vfV].mac、.ip（点分或数值）与 .vlan.{pvid,pri,trunk}，build 时读一次，取值错误 fatal。
+	// 缺省 MAC/IPv4 要用路由策略的 vport，到 publish 时才推导（平台可能在 load_params 之后改路由策略）。
 	extern protected function void load_function_l2();
 
-	// 单个 Function 的 L2 取值：MAC 非零单播（bit 40 为 0），PVID 1..4094，优先级 0..7，trunk 每项 1..4094、
-	// 互不相同且不含 PVID。
+	// 单个 Function 的 L2 取值：MAC 非零单播（bit 40 为 0），IPv4 不是 0.0.0.0、255.255.255.255、127/8 或 224/4，
+	// PVID 1..4094，优先级 0..7，trunk 每项 1..4094、互不相同且不含 PVID。
 	extern static function bit check_function_l2(
 		input dpu_function_l2_t	l2,
 		output string			why
+	);
+
+	// 点分 IPv4 文本 a.b.c.d（每段十进制 0..255）；格式错误返回 0 与原因，ip 不变。
+	extern static function bit parse_ipv4_text(
+		input string		text,
+		inout bit [31:0]	ip,
+		output string		why
 	);
 
 	// 发布用：路由策略的 vport 在全部 Host 上互不相同（DUT 的 global Function ID，驱动从全设备一个位图分配）。
@@ -162,8 +169,8 @@ class dpu_env_cfg extends uvm_object;
 		output string				why
 	);
 
-	// 发布用：每个快照 Function 一项；没显式给 mac 时按路由策略的 vport 推导（没有路由策略就没有 MAC），再检查取值，
-	// 以及全部 Host 上 MAC 互不相同。失败返回原因，不改 this。
+	// 发布用：每个快照 Function 一项；没显式给 mac/ip 时按路由策略的 vport 推导（没有路由策略就没有 MAC/IPv4），再检查
+	// 取值，以及全部 Host 上 MAC、IPv4 各自互不相同。失败返回原因，不改 this。
 	extern protected function bit materialize_function_l2(
 		input dpu_device_snapshot	device,
 		input dpu_function_policy_t	policies[string],
@@ -1514,6 +1521,32 @@ function void dpu_env_cfg::load_function_l2();
 				l2.mac_valid = 1;
 			end
 		end
+		// IPv4：点分 a.b.c.d（每段十进制 0..255）或 aip 数值，格式错误 fatal；空值保持缺省。
+		if (aip_cmdline_query::present(path, "ip")) begin
+			string		raw;
+			bit [31:0]	ip;
+			bit			given;
+
+			raw   = aip_cmdline#(string)::get_cmdline_string("ip", path);
+			ip    = l2.ip;
+			given = 0;
+			if (aip_str::str_find(raw, ".") >= 0) begin
+				if (!parse_ipv4_text(raw, ip, why))
+					`uvm_fatal("PROJECT_CFG", $sformatf("%s.ip=%s: %s", path, raw, why))
+				else begin
+					given = 1;
+					if (aip_cmdline_print_control::should_print("ip", path))
+						`aip_info(("[aip_cmdline] param 'ip' (scope='%s') = %s", path, dpu_ipv4_string(ip)));
+				end
+			end
+			else
+				`aip_int_opt(path, bit [31:0], ip, given)
+			if (given) begin
+				l2.ip       = ip;
+				l2.ip_given = 1;
+				l2.ip_valid = 1;
+			end
+		end
 		begin
 			int unsigned	pvid;
 			int unsigned	pri;
@@ -1549,6 +1582,9 @@ function bit dpu_env_cfg::check_function_l2(
 	if (l2.mac_valid && (l2.mac == 0 || l2.mac[40]))
 		why = $sformatf("%s.mac=%s must be a non-zero unicast MAC (bit 40 = 0)", path,
 						dpu_mac_string(l2.mac));
+	else if (l2.ip_valid && dpu_ipv4_reserved(l2.ip))
+		why = $sformatf("%s.ip=%s is not a usable unicast IPv4 (0.0.0.0, 255.255.255.255, 127/8 and 224/4 are reserved)",
+						path, dpu_ipv4_string(l2.ip));
 	else if (l2.pvid < 1 || l2.pvid > 4094)
 		why = $sformatf("%s.vlan.pvid=%0d is outside 1..4094", path, l2.pvid);
 	else if (l2.pri > 7)
@@ -1568,6 +1604,49 @@ function bit dpu_env_cfg::check_function_l2(
 	return why == "";
 endfunction
 
+function bit dpu_env_cfg::parse_ipv4_text(
+	input string		text,
+	inout bit [31:0]	ip,
+	output string		why
+);
+	string		parts[$];
+	string		cur;
+	bit [31:0]	value;
+
+	why = "";
+	cur = "";
+	foreach (text[i]) begin
+		if (text[i] == ".") begin
+			parts.push_back(cur);
+			cur = "";
+		end
+		else
+			cur = {cur, string'(text[i])};
+	end
+	parts.push_back(cur);
+	if (parts.size() != 4) begin
+		why = "requires four IPv4 octets a.b.c.d";
+		return 0;
+	end
+	value = 0;
+	foreach (parts[i]) begin
+		string	octet_text;
+		bit		digits;
+
+		octet_text = aip_str::strip(parts[i]);
+		digits     = octet_text.len() inside {[1:3]};
+		foreach (octet_text[k])
+			if (octet_text[k] < "0" || octet_text[k] > "9") digits = 0;
+		if (!digits || octet_text.atoi() > 255) begin
+			why = $sformatf("IPv4 octet '%s' is not a decimal 0..255", parts[i]);
+			return 0;
+		end
+		value = {value[23:0], 8'(octet_text.atoi())};
+	end
+	ip = value;
+	return 1;
+endfunction
+
 function bit dpu_env_cfg::materialize_function_l2(
 	input dpu_device_snapshot	device,
 	input dpu_function_policy_t	policies[string],
@@ -1576,6 +1655,7 @@ function bit dpu_env_cfg::materialize_function_l2(
 );
 	dpu_function_key_t	keys[$];
 	string				owner_of[bit [47:0]];
+	string				ip_owner[bit [31:0]];
 
 	effective.delete();
 	why = "";
@@ -1595,6 +1675,11 @@ function bit dpu_env_cfg::materialize_function_l2(
 			l2.mac       = '0;
 			if (l2.mac_valid) l2.mac = dpu_default_function_mac(keys[i].host_id, policies[name].vport);
 		end
+		if (!l2.ip_given) begin
+			l2.ip_valid = policies.exists(name);
+			l2.ip       = '0;
+			if (l2.ip_valid) l2.ip = dpu_default_function_ip(keys[i].host_id, policies[name].vport);
+		end
 		if (!check_function_l2(l2, why)) return 0;
 		if (l2.mac_valid) begin
 			if (owner_of.exists(l2.mac)) begin
@@ -1603,6 +1688,14 @@ function bit dpu_env_cfg::materialize_function_l2(
 				return 0;
 			end
 			owner_of[l2.mac] = path;
+		end
+		if (l2.ip_valid) begin
+			if (ip_owner.exists(l2.ip)) begin
+				why = $sformatf("%s and %s share IPv4 %s; give each Function its own %s.ip", ip_owner[l2.ip],
+								path, dpu_ipv4_string(l2.ip), path);
+				return 0;
+			end
+			ip_owner[l2.ip] = path;
 		end
 		effective[name] = l2;
 	end

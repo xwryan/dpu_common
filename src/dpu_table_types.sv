@@ -210,7 +210,8 @@ typedef struct {
 	bit					vdpa;
 } dpu_function_policy_t;
 
-// 每 Function 的 L2 身份：AF 给 Function 分配的 MAC 与 VLAN（缺省 VLAN 即 PVID，驱动缺省 1）。成员 VLAN = PVID ∪ trunk。
+// 每 Function 的 L2 身份：AF 给 Function 分配的 MAC 与 VLAN（缺省 VLAN 即 PVID，驱动缺省 1），以及该 Function 的 IPv4
+// （RoCEv2 的源地址与对端的目的地址）。成员 VLAN = PVID ∪ trunk。
 // DUT 一条路径最多处理两层标签（外层 S-tag + 内层 C-tag），三层及以上是异常路径，不在 Function 配置里描述。
 typedef struct {
 	dpu_function_key_t	key;
@@ -222,9 +223,14 @@ typedef struct {
 	int unsigned		pvid;
 	int unsigned		pri;
 	int unsigned		trunk[$];
+	// IPv4 同 MAC：没有路由策略又没显式给 ip 的 Function 没有 IPv4（ip_valid=0）；ip_given=1 为显式给出
+	// dpu.hH.pfP[.vfV].ip，否则发布时按 Host/vport 推导（dpu_default_function_ip）。
+	bit					ip_valid;
+	bit					ip_given;
+	bit [31:0]			ip;
 } dpu_function_l2_t;
 
-// L2 缺省值：没有 MAC（发布时按 Host/vport 推导）、PVID 1、优先级 0、trunk 为空。
+// L2 缺省值：没有 MAC 与 IPv4（发布时按 Host/vport 推导）、PVID 1、优先级 0、trunk 为空。
 function automatic dpu_function_l2_t dpu_default_function_l2(input dpu_function_key_t	key);
 	dpu_function_l2_t	value;
 
@@ -235,6 +241,9 @@ function automatic dpu_function_l2_t dpu_default_function_l2(input dpu_function_
 	value.pvid      = 1;
 	value.pri       = 0;
 	value.trunk.delete();
+	value.ip_valid  = 0;
+	value.ip_given  = 0;
+	value.ip        = '0;
 	return value;
 endfunction
 
@@ -242,6 +251,26 @@ endfunction
 function automatic bit [47:0] dpu_default_function_mac(input int unsigned	host_id,
 													   input int unsigned	vport);
 	return {8'h02, 8'h00, 8'h00, host_id[7:0], vport[15:0]};
+endfunction
+
+// 缺省 IPv4：10.<Host 号低 8 位>.<(vport+1) 高 8 位>.<(vport+1) 低 8 位>，例如 h0 vport 0 为 10.0.0.1。vport 全设备唯一，
+// 缺省值因此互不相同。
+function automatic bit [31:0] dpu_default_function_ip(input int unsigned	host_id,
+													  input int unsigned	vport);
+	bit [15:0]	n;
+
+	n = 16'(vport + 1);
+	return {8'd10, host_id[7:0], n[15:8], n[7:0]};
+endfunction
+
+// 不能作 Function 地址的 IPv4：0.0.0.0、255.255.255.255、环回 127/8 与组播 224/4。
+function automatic bit dpu_ipv4_reserved(input bit [31:0]	ip);
+	return ip == 32'h0 || ip == 32'hffff_ffff || ip[31:24] == 8'd127 || ip[31:28] == 4'he;
+endfunction
+
+// 日志用的 IPv4 文本 a.b.c.d。
+function automatic string dpu_ipv4_string(input bit [31:0]	ip);
+	return $sformatf("%0d.%0d.%0d.%0d", ip[31:24], ip[23:16], ip[15:8], ip[7:0]);
 endfunction
 
 // VID 是否为该 Function 的成员（PVID 或 trunk 中的一项）。
