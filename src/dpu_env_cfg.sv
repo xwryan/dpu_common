@@ -135,8 +135,10 @@ class dpu_env_cfg extends uvm_object;
 	// VTX/VRX 使用四次 DWORD 数据写和控制触发端口，不把间接表当作线性 MMIO。
 	extern function void use_driver_reference_layouts();
 
-	// 无 PCIe IP 的参考接线：各 Host PF0 / VF=-1 / wire requester=0 / vport=0，仅为 Intel sideband/DMA 软件路由，不代表已写 BDF/PFVF 表。
-	// 显式 policy 优先作为缺省值，CLI 可覆盖字段；其余 PF/VF 不猜 requester/Intel 身份。
+	// 无 PCIe IP 的参考接线：各 Host PF0 / VF=-1 / wire requester=0，仅为 Intel sideband/DMA 软件路由，不代表已写 BDF/PFVF 表。
+	// 显式 policy 优先作为缺省值，CLI 可覆盖字段；其余 PF/VF 不猜 requester/Intel 身份（requester/intel_pf/intel_vf 须同时给）。
+	// vport 可省：按 Function 顺序（Host、PF、其 VF）取显式值与先前自动值都没占用的最小号，全设备唯一，同驱动的 global
+	// Function ID；bdf_index 不给时等于最终的 vport。
 	// 可选 pfvf（DUT pfvf_id，0..1023）与 PF 的 first_vf_offset（0..1023）只在存有路由策略的 Function 上有效，缺省 0，
 	// 不按拓扑推导编号。
 	extern protected function void load_function_routes();
@@ -150,6 +152,14 @@ class dpu_env_cfg extends uvm_object;
 	extern static function bit check_function_l2(
 		input dpu_function_l2_t	l2,
 		output string			why
+	);
+
+	// 发布用：路由策略的 vport 在全部 Host 上互不相同（DUT 的 global Function ID，驱动从全设备一个位图分配）。
+	// 失败返回原因，不改 this。
+	extern protected function bit check_vport_unique(
+		input dpu_device_snapshot	device,
+		input dpu_function_policy_t	policies[string],
+		output string				why
 	);
 
 	// 发布用：每个快照 Function 一项；没显式给 mac 时按路由策略的 vport 推导（没有路由策略就没有 MAC），再检查取值，
@@ -1327,27 +1337,38 @@ function void dpu_env_cfg::use_driver_reference_layouts();
 endfunction
 
 function void dpu_env_cfg::load_function_routes();
+	// 第一遍逐个 Function 读路由字段；vport 没给的记下，第二遍按 Function 顺序（Host、PF、其 VF）取显式值与先前自动值
+	// 都没占用的最小号，与驱动从全设备位图取第一个空号作 global Function ID（vport）相同，全设备唯一。
+	dpu_function_policy_t	routed[string];
+	string					order[$];
+	bit						auto_vport[string];
+	bit						bdf_given[string];
+	bit						taken[int unsigned];
+
 	foreach (device_cfg.functions[f]) begin
 		dpu_function_key_t		owner;
 		dpu_function_policy_t	policy;
 		string					name;
 		string					path;
-		bit						provided;
-		bit [3:0]				fields_present;
+		bit						existing;
+		bit						implicit;
+		bit [2:0]				fields_present;
+		bit						vport_given;
 		bit						numbering_present;
 
 		owner    = device_cfg.functions[f].key;
 		name     = dpu_function_key_name(owner);
-		provided = function_policies.exists(name);
-		if (provided) begin
+		existing = function_policies.exists(name);
+		implicit = 0;
+		if (existing) begin
 			policy = function_policies[name];
 		end else begin
 			policy   = '{key: owner, mode: DPU_HOST_EP, intel_vf: -1, default: 0};
-			provided = owner.kind == DPU_FUNCTION_PF && owner.pf_id == 0 && vfs_per_pf == 0;
+			implicit = owner.kind == DPU_FUNCTION_PF && owner.pf_id == 0 && vfs_per_pf == 0;
 		end
-
-		if (!function_policies.exists(name)) policy.bdf_index = policy.vport;
-		fields_present    = provided ? 4'hf : 0;
+		// 平台预先给的策略（含其中的 vport、bdf_index）都算显式；隐式 PF0 路由与新给的路由不带 vport 时自动分配。
+		fields_present    = (existing || implicit) ? 3'h7 : 3'h0;
+		vport_given       = existing;
 		numbering_present = 0;
 		path              = function_param_path(owner);
 		begin
@@ -1379,7 +1400,8 @@ function void dpu_env_cfg::load_function_routes();
 					4: policy.pfvf = value;
 					5: policy.first_vf_offset = value;
 				endcase
-				if (i < 4) fields_present[i] = 1;
+				if (i < 3) fields_present[i] = 1;
+				else if (i == 3) vport_given = 1;
 				else numbering_present = 1;
 			end
 		end
@@ -1387,7 +1409,6 @@ function void dpu_env_cfg::load_function_routes();
 			string				raw;
 			longint unsigned	value;
 
-			if (!function_policies.exists(name)) policy.bdf_index = policy.vport;
 			raw = aip_cmdline#(longint unsigned)::get_cmdline_string("bdf_index", path);
 			if (raw != "") begin
 				if (aip_str::str_find(raw, "-") >= 0)
@@ -1398,13 +1419,66 @@ function void dpu_env_cfg::load_function_routes();
 					`uvm_fatal("PROJECT_CFG", "bdf_index exceeds 128-row requester table")
 				policy.bdf_index = value;
 			end
+			bdf_given[name] = existing || raw != "";
 		end
-		if ((fields_present != 0 || numbering_present) && fields_present != 4'hf) begin
+		if ((fields_present != 0 || vport_given || numbering_present) && fields_present != 3'h7) begin
 			`uvm_fatal("PROJECT_CFG", {
-					   path, " requires requester, intel_pf, intel_vf and vport together"})
+					   path, " requires requester, intel_pf and intel_vf together (vport is optional and assigned ",
+					   "automatically when omitted)"})
 		end
-		if (fields_present == 4'hf) function_policies[name] = policy;
+		if (fields_present != 3'h7) continue;
+		routed[name]     = policy;
+		auto_vport[name] = !vport_given;
+		order.push_back(name);
+		if (vport_given) taken[policy.vport] = 1;
 	end
+	foreach (order[i]) begin
+		string	name;
+
+		name = order[i];
+		if (auto_vport[name]) begin
+			int unsigned	vport;
+
+			vport = 0;
+			while (vport < 1024 && taken.exists(vport)) vport++;
+			if (vport >= 1024)
+				`uvm_fatal("PROJECT_CFG", {function_param_path(routed[name].key),
+										   ": no free vport in 0..1023 is left for automatic assignment"})
+			routed[name].vport = vport;
+			taken[vport]       = 1;
+		end
+		// bdf_index 不给时等于最终的 vport（自动分配的也一样）。
+		if (!bdf_given[name]) routed[name].bdf_index = routed[name].vport;
+		function_policies[name] = routed[name];
+	end
+endfunction
+
+function bit dpu_env_cfg::check_vport_unique(
+	input dpu_device_snapshot	device,
+	input dpu_function_policy_t	policies[string],
+	output string				why
+);
+	dpu_function_key_t	keys[$];
+	string				owner_of[int unsigned];
+
+	why = "";
+	device.list_functions(keys);
+	foreach (keys[i]) begin
+		string	name;
+		string	path;
+
+		name = dpu_function_key_name(keys[i]);
+		if (!policies.exists(name)) continue;
+		path = function_param_path(keys[i]);
+		if (owner_of.exists(policies[name].vport)) begin
+			why = $sformatf({"%s and %s share vport %0d; a vport is device-wide (the DUT's global Function ID), ",
+							 "so drop the explicit %s.vport to have one assigned automatically, or pick another"},
+							owner_of[policies[name].vport], path, policies[name].vport, path);
+			return 0;
+		end
+		owner_of[policies[name].vport] = path;
+	end
+	return 1;
 endfunction
 
 function string dpu_env_cfg::function_param_path(input dpu_function_key_t	key);
@@ -3658,6 +3732,7 @@ function bit dpu_env_cfg::publish(
 	end
 	if (!check_msix_pfvf(candidate.messages, function_policies, why) ||
 		!check_msix_globals(candidate.messages, resources, why) ||
+		!check_vport_unique(device, function_policies, why) ||
 		!materialize_function_l2(device, function_policies, l2, why))
 		return 0;
 	// 此后没有可能失败的分支；一起发布身份、生成消息和公共表冻结值。

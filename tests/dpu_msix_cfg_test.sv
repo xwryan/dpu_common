@@ -341,8 +341,9 @@ module dpu_msix_cfg_test;
 	endfunction
 
 	initial begin
-		string			fields[$] = '{"requester", "intel_pf", "intel_vf", "vport"};
-		string			values[$] = '{"1", "1", "-1", "1"};
+		// vport 不给：按 Function 顺序自动分配，全设备唯一（h0.pf0 0、h0.pf1 1、h1.pf0 2、h1.pf1 3）。
+		string			fields[$] = '{"requester", "intel_pf", "intel_vf"};
+		string			values[$] = '{"1", "1", "-1"};
 		int unsigned			pfvf[string];
 		dpu_env_cfg				cfg;
 		dpu_env_cfg				early;
@@ -400,7 +401,9 @@ module dpu_msix_cfg_test;
 		aip_cmdline_override::clear("dpu.h0.pf1.first_vf_offset");
 		check_param("dpu.h0.pf1.pfvf", "1024", 0, "dpu.h0.pf1.pfvf is outside the Intel/VIO field range");
 		check_param("dpu.h0.pf0.vf0.pfvf", "3", 1,
-			"dpu.h0.pf0.vf0 requires requester, intel_pf, intel_vf and vport together");
+			"dpu.h0.pf0.vf0 requires requester, intel_pf and intel_vf together (vport is optional and assigned automatically when omitted)");
+		check_param("dpu.h0.pf0.vf0.vport", "3", 1,
+			"dpu.h0.pf0.vf0 requires requester, intel_pf and intel_vf together (vport is optional and assigned automatically when omitted)");
 		check_param("dpu.h0.pf0.vf0.first_vf_offset", "1", 1, "dpu.h0.pf0.vf0.first_vf_offset is set on the PF only");
 		$display("DPU_MSIX_CFG_PASS");
 		$finish;

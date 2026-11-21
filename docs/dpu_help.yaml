@@ -112,11 +112,11 @@ dpu.h0.pf0.bdf_mode: DPU_ALLOC_AUTO                # DPU_ALLOC_AUTO / DPU_ALLOC_
 dpu.h0.pf0.bdf: 0x0100                             # 示例；PINNED 时的 BDF，须在 bdf_first..bdf_last 且未预留
 dpu.h0.pf0.segment: 0                              # PCIe segment，当前只有 0
 dpu.h0.pf0.services: DPU_SERVICE_VIO_NET           # 可承载的 service 列表：DPU_SERVICE_VIO_NET/RDMA/VBLK
-dpu.h0.pf0.requester: 0                            # requester ID 0..65535；requester/intel_pf/intel_vf/vport 须同时给，只有无 VF 时的 PF0 有缺省
+dpu.h0.pf0.requester: 0                            # requester ID 0..65535；requester/intel_pf/intel_vf 须同时给（vport 可省），只有无 VF 时的 PF0 有缺省
 dpu.h0.pf0.intel_pf: 0                             # Intel PF 编号 0..7
 dpu.h0.pf0.intel_vf: -1                            # PF 必须为 -1；VF 为 0..2047
-dpu.h0.pf0.vport: 0                                # vport 0..1023
-dpu.h0.pf0.bdf_index: 0                            # BDF 表索引 0..127，缺省等于 vport
+dpu.h0.pf0.vport: 0                                # 示例；vport 0..1023，全设备唯一（DUT 的 global Function ID，驱动从全设备位图取空号）。缺省自动分配：按 Host、PF、其 VF 的顺序取显式值和先前自动值都没占用的最小号，例如两个 Host 各一个 PF0 时为 0、1；显式给出的值在全部 Host 上重复时 publish 报错
+dpu.h0.pf0.bdf_index: 0                            # BDF 表索引 0..127，缺省等于 vport（含自动分配的）
 dpu.h0.pf0.pfvf: 0                                 # DUT 的 pfvf_id 0..1023；MSI-X linear 表按 Host/pfvf/本地向量查找，同一 Host 上有 MSI-X 消息的 Function 须各不相同，publish 时检查
 dpu.h0.pf0.first_vf_offset: 0                      # 只用于 PF：写进 PFVF 表的 first_vf_offset，0..1023；给在 VF 上即报错
 # pfvf、first_vf_offset 只能和上面四项路由一起给（无 VF 时 PF0 的缺省路由也算），缺省 0，dpu_common 不按拓扑推导编号。
@@ -125,10 +125,10 @@ dpu.h0.pf0.bar0.placement: DPU_ALLOC_AUTO          # BAR 放置：DPU_ALLOC_AUTO
 dpu.h0.pf0.bar0.base: 0                            # PINNED 基址：按大小对齐、在 BAR 窗口内、不与其他 BAR 或预留区重叠
 dpu.h0.pf0.bar0.size: 0x2000000                    # 须等于 DUT profile：PF bar0/2/4 = 32MB/64KB/64KB，VF = 16KB/16KB/32KB
 # bar<B>.role / bar / alignment 同样只能等于 DUT profile（role 依次为 DEVICE_MEMORY/MAILBOX/MSIX，alignment 等于 size）。
-dpu.h0.pf0.vf0.requester: 0                        # 示例；VF 路由四项须同时给
+dpu.h0.pf0.vf0.requester: 0                        # 示例；VF 的 requester/intel_pf/intel_vf 须同时给，vport 可省
 dpu.h0.pf0.vf0.intel_pf: 0                         # 示例；VF 所属 Intel PF
 dpu.h0.pf0.vf0.intel_vf: 0                         # 示例；Intel VF 编号 0..2047
-dpu.h0.pf0.vf0.vport: 1                            # 示例；VF vport 0..1023
+dpu.h0.pf0.vf0.vport: 1                            # 示例；VF vport 0..1023，与 PF 同一个全设备编号空间，缺省自动分配
 dpu.h0.pf0.vf0.bdf_index: 1                        # 示例；VF 的 BDF 表索引 0..127，缺省等于 vport
 dpu.h0.pf0.vf0.pfvf: 1                             # 示例；VF 的 DUT pfvf_id 0..1023，缺省 0；与所属 PF 的 pfvf/first_vf_offset 的关系由平台 validator 核对
 # Function L2 身份（AF 给每个 Function 分配的 MAC 与 VLAN；build 时读取，Tcl load_params 不重读）：publish 时补齐缺省、
