@@ -11,7 +11,7 @@
 #
 # 对应代码：各仓库的以下提交（2026-11-21；带 * 的是尚未推送到 GitHub 的本地提交）。
 #   aip_core 6211ce9       dpu_common 65a73fd    host_mem 557af36     pcie_work a61b86c      inter_pcie fd36553
-#   net_packet 7dd10da     virtio_work aea7478   rdma_work 52ca22f    eth_seg_agent b1277c3  dpu_queue_work 5648732
+#   net_packet 7dd10da     virtio_work aea7478   rdma_work 675bc0e    eth_seg_agent 5b7fdb0  dpu_queue_work 5648732
 #   flow_control 2b58bce
 # host_mem 由第 9 节的 dpu.mem_* 配置，自身不读参数；flow_control 不读参数；simflow 是运行流程工具，不在本文范围。
 #
@@ -675,8 +675,8 @@ rdma.qp.type: RC                                   # RC/UD/URC；UD 只支持 se
 rdma.qp.depth: 256                                 # SQ/RQ/CQ 深度请求，1..32768（驱动取 2 的幂，RC/UD ≥256，URC ≥8）
 rdma.qp.mtu: 1024                                  # 256/512/1024/2048/4096
 rdma.qp.max_sge: 4                                 # 每 WR 最大 SGE，1..4
-rdma.qp.psn: 0                                     # 起始 PSN（本端 SQ 与对端 RQ），≤0xffffff；RX-only 作 RTR rq_psn
-rdma.qp.dest_qpn: 0                                # rdma_run tx_only/rx_only 的 dest_qpn 缺省，≤0xffffff
+rdma.qp.psn: 0                                     # 起始 PSN（本端 SQ 与对端 RQ），≤0xffffff；RX-only 作 RTR rq_psn，TX-peer 作 SQ 起点，多 QP 时每个 QP 相同
+rdma.qp.dest_qpn: 0                                # rdma_run tx_only/rx_only/tx_peer 的 dest_qpn 缺省，≤0xffffff
 rdma.qp.qkey: 0x80010000                           # UD Q_Key，也是 rdma_run dest_qkey 缺省；rxe 插件改为 0x12345678
 rdma.qp.timeout: 14                                # ACK 超时编码 0..31，0=不超时（rxe 插件强制 0）
 rdma.qp.retry: 7                                   # 重传次数，0..7
@@ -686,7 +686,7 @@ rdma.qp.min_rnr: 1                                 # RNR NAK 定时器编码，0
 # RDMA 场景：内存（每个业务端点一块缓冲与 MR；本端槽在前半，远端/接收槽在后半）
 rdma.mem.buf_bytes: 0x20000                        # 每端缓冲字节数，须 ≥ mr_offset + 2×slots×slot_bytes
 rdma.mem.slot_bytes: 0x1000                        # 单条消息槽字节数（len 上限）；UD 须 >40（GRH）
-rdma.mem.slots: 8                                  # 槽数，>0；TX/RX-only 时 count 不能超过它
+rdma.mem.slots: 8                                  # 槽数，>0；TX-only/RX-only/TX-peer 时 count 不能超过它（单端第 i 条用第 i 个槽，多 QP 也一样）
 rdma.mem.mr_offset: 0                              # MR 在缓冲内的偏移；cas/faa 须 8 字节对齐
 rdma.mem.mr_remote_read: 1                         # 远端读权限，read 需要
 rdma.mem.mr_remote_write: 1                        # 远端写权限，write/write_imm 需要
@@ -704,7 +704,7 @@ rdma.pkt.udp_sport: 0                              # UDP 源端口，0..65535；
 
 # RDMA 场景：流量
 rdma.traffic.op: send                              # send/send_imm/write/write_imm/read/cas/faa，或 mix（按 w_* 逐条抽）
-rdma.traffic.count: 32                             # 业务 WR 数，>0；TX/RX-only ≤mem.slots，TX-only RC 还须 ≤qps，RX-only 还须 ≤qp.depth
+rdma.traffic.count: 32                             # 业务 WR 数，>0；TX-only/RX-only/TX-peer ≤mem.slots，TX-only RC 还须 ≤qps，RX-only/TX-peer 每个 QP 分到的条数 ≤qp.depth；单端多 QP 与 mesh 还须 ≥流数
 rdma.traffic.w_send: 1                             # mix 权重，0 禁用；七项之和 1..0xffffffff
 rdma.traffic.w_send_imm: 1                         # mix 权重
 rdma.traffic.w_write: 1                            # mix 权重
@@ -715,9 +715,9 @@ rdma.traffic.w_faa: 1                              # mix 权重
 rdma.traffic.signaled_pct: 100                     # signaled 比例，0..100；TX-only 全部 signaled
 rdma.traffic.dir: 2                                # 0=f0 发起，1=f1 发起，2=逐条随机；TX-only 固定 f0
 # 下面六项保留原文、每条 WR 求值；数值采样超出范围直接 UVM_FATAL（不裁剪、不重抽）。
-rdma.traffic.len: auto                             # 字节；auto 取 [1:本模式上限]：slot_bytes，UD 为 min(mtu,slot_bytes-40)，TX-only 为 min(mtu,slot_bytes)，RX-only 为 min(mtu,slot_bytes，UD 再减 40)；显式表达式越界即 fatal；原子固定 8
+rdma.traffic.len: auto                             # 字节；auto 取 [1:本模式上限]：slot_bytes，UD 为 min(mtu,slot_bytes-40)，TX-only 为 min(mtu,slot_bytes)，RX-only/TX-peer 为 min(mtu,slot_bytes，UD 再减 40)；显式表达式越界即 fatal；原子固定 8
 rdma.traffic.sge: 1                                # SGE 数，1..min(max_sge,len)；原子与 rxe 远端发起时固定 1
-rdma.traffic.data_mode: auto                       # auto 逐条从 RANDOM/FIXED/INCREMENT/PATTERN 等概率选，RX-only 不选 RANDOM；显式列表（无权重）中 RX-only 抽到 RANDOM 即报错
+rdma.traffic.data_mode: auto                       # auto 逐条从 RANDOM/FIXED/INCREMENT/PATTERN 等概率选，RX-only/TX-peer 不选 RANDOM；显式列表（无权重）中 RX-only/TX-peer 抽到 RANDOM 即报错
 rdma.traffic.data_fixed: 0                         # FIXED 时的负载字节，0..255
 rdma.traffic.data_pattern: "{0}"                   # PATTERN 的字节序列 {e0,e1,...}，每项 0..255，每项可写表达式
 rdma.traffic.imm: ""                               # SEND_IMM/WRITE_IMM 立即数，0..0xffffffff；空=每条随机
@@ -733,16 +733,45 @@ rdma.traffic.imm: ""                               # SEND_IMM/WRITE_IMM 立即�
 # 每个键依次取：命令参数 > rdma.run.<键>（plusarg 或 set_param，每次启动重读）> 行内注明的缺省。只接受整数字面量（十进制或 0x），
 #   不支持随机语法，非法值返回 ERROR 而不 fatal；叶名回退同样生效（+qps= 也会命中 rdma.run.qps）。
 # 另起一条可并发的同类命令：aip_bind_seq cmd=<名> type=rdma_run_seq sqr=rdma path=rdma.run_x（rdma_rx_wait_seq 同理）。
-rdma.run.f0: 0                                     # 示例；发起端（TX-only 为发送端、RX-only 为接收端）global Function ID，0..255，必给
-rdma.run.f1: 1                                     # 示例；双端模式的对端 global ID，0..255 且 ≠f0；tx_only/rx_only 时不读
-rdma.run.qps: 1                                    # 本次新建 QP 对数，≥1；rx_only 须为 1
+rdma.run.f0: 0                                     # 示例；发起端（TX-only/TX-peer 为发送端、RX-only 为接收端）global Function ID，0..255，必给
+rdma.run.f1: 1                                     # 示例；双端模式的对端 global ID，0..255 且 ≠f0；tx_only/rx_only/tx_peer 时不读
+rdma.run.qps: 1                                    # 本端 QP 数，≥1：双端为 f0 侧，rx_only/tx_peer 为本端（多 QP 见 peer_qps/flows）；TX-only 为发送 QP 数
+rdma.run.peer_qps: 1                               # 示例，缺省同 qps；对端 QP 数（双端为 f1 侧，rx_only/tx_peer 为另一个仿真里的对端），≥1；tx_only 不读
+rdma.run.flows: pair                               # 示例；pair=发送侧第 i 个 QP 对接收侧第 i 个（两侧数量须相同，RC/URC 只能 pair），mesh=每个发送 QP 对每个接收 QP（只用于 UD）；缺省两侧数量相同为 pair，否则 mesh；tx_only 不读
+# 多 QP 的流：双端的发送侧/接收侧指 f0 侧/f1 侧，rx_only 的本端是接收侧，tx_peer 的本端是发送侧。pair 第 f 条流为（发送 f，
+#   接收 f）；mesh 第 f 条为（发送 f mod 发送 QP 数，接收 f div 发送 QP 数）。第 i 条消息走第 i mod 流数 条流，流内保序。
+#   mesh 与单端多 QP 要求 count ≥流数；双端 pair 与原来相同（第 i 条用第 i mod qps 对 QP）。
 rdma.run.tx_only: 0                                # 1=只建发送端并核对首发完整帧；只支持 RC/UD 的 send/send_imm（违例为 UVM_FATAL）
-rdma.run.rx_only: 0                                # 1=只建接收端、预投 count 个 RECV，返回发包字段，再 rdma_rx_wait；与 tx_only 互斥
-rdma.run.dest_qpn: 0x12345                         # 示例；对端 QPN，缺省 rdma.qp.dest_qpn；tx/rx_only 须 1..0xffffff
+rdma.run.rx_only: 0                                # 1=只建接收端、预投 count 个 RECV，返回发包字段（结果行），再 rdma_rx_wait；与 tx_only/tx_peer 互斥
+rdma.run.tx_peer: 0                                # 1=只建发送端，发给本 env 之外的接收方（如另一仿真里的 rx_only）：按接收端结果行的同一模板发 count 条、逐条不等待，再等全部发送完成（RC 等 ACK）并核对完成状态；结果行与 rx_only 同字段同含义；与 tx_only/rx_only 互斥
+rdma.run.dest_qpn: 0x12345                         # 示例；对端 QPN（多 QP 时为对端连续一段的起点），缺省 rdma.qp.dest_qpn；tx_only/rx_only/tx_peer 须 1..0xffffff
 rdma.run.dest_qkey: 0x80010000                     # UD 对端 Q_Key，缺省 rdma.qp.qkey，≤0xffffffff
-rdma.run.dmac: 0x001122334455                      # 示例；对端 MAC（dst_mac 为别名），缺省 rdma.pkt.dst_mac；tx/rx_only 须非 0
+rdma.run.dmac: 0x001122334455                      # 示例；对端 MAC（dst_mac 为别名），缺省 rdma.pkt.dst_mac；tx_only/rx_only/tx_peer 须非 0
+# 以下单端键只在 rx_only/tx_peer 下读，用在别的模式时写在命令参数里即返回 ERROR，路径值不读。
+rdma.run.local_qpn: 0x10                           # 示例，缺省 0；本端 QPN（多 QP 时为连续 qps 个号的起点）。逐个核对：非 0/1、<rdma.resource.qp_count、未占用，否则 ERROR、不建资源；0 由驱动分配（多 QP 时从驱动下一个空闲号起取一段）
+rdma.run.psn: 0x100                                # 示例，缺省 rdma.qp.psn；RX-only 的 rq_psn / TX-peer 的 SQ 起点，两端须相同
+rdma.run.opcode: RC_SEND_ONLY_IMM                  # 示例，缺省从 rdma.traffic.op 抽取；结果行的 IBTA 名：RC_SEND_ONLY、RC_SEND_ONLY_IMM、RC_RDMA_WRITE_ONLY_IMM、UD_SEND_ONLY、UD_SEND_ONLY_IMM，须与 rdma.qp.type 一致
+rdma.run.len: 256                                  # 示例，缺省从 rdma.traffic.len 抽取；单包长度，越界返回 ERROR
+rdma.run.data: FIXED                               # 示例，缺省从 rdma.traffic.data_mode 抽取；FIXED/INCREMENT/PATTERN（RANDOM 拒绝）
+rdma.run.payload_byte: 0x5a                        # 示例；FIXED 的负载字节，缺省从 rdma.traffic.data_fixed 抽取
+rdma.run.pattern: "{0xde,0xad}"                    # 示例；PATTERN 的字节序列，多字节写成 {..}（aip 参数以逗号分隔）
+rdma.run.imm: 0x12345678                           # 示例；SEND_IMM/WRITE_IMM 的立即数，缺省从 rdma.traffic.imm 抽取
+rdma.run.slot_bytes: 4096                          # 示例，缺省 rdma.mem.slot_bytes；接收槽字节数（WRITE_IMM 第 i 条写 va+i×slot_bytes）
+rdma.run.qkey: 0x80010000                          # 示例，只用于 rx_only：本端 Q_Key，缺省 rdma.qp.qkey（tx_peer 的 qkey 是结果行别名，见下）
+rdma.run.va: 0x8000                                # 示例，只用于 tx_peer：WRITE_IMM 的接收端 va（接收端结果行给出，运行时分配）
+rdma.run.rkey: 0x100                               # 示例，只用于 tx_peer：WRITE_IMM 的接收端 rkey
+rdma.run.timeout_us: 100000                        # 示例，只用于 tx_peer：等全部发送完成的仿真时间上限，>0，缺省 rdma.env.response_timeout_us
+rdma.run.dst_ip: 10.0.0.2                          # 示例，只用于 tx_peer：接收端 IPv4（点分或数字），RTR 写进发送 QP，缺省 rdma.pkt.dst_ip
+# 单端的框架键 count=N 是消息数（缺省 rdma.traffic.count；双端与 tx_only 只接受 count=1）。
+# 结果行别名（rx_only 结果行的字段名，命令参数或 rdma.run.<别名> 都可；同一级内规范键名优先，命令参数的别名先于路径值）：
+#   qpn=接收端 QPN（rx_only 即 local_qpn，tx_peer 即 dest_qpn）、src_qpn=发送端 QPN（rx_only 即 dest_qpn，tx_peer 即 local_qpn）、
+#   qkey=接收端 Q_Key（tx_peer 即 dest_qkey）、rx_qps/tx_qps=接收端/发送端 QP 数（rx_only 即 qps/peer_qps，tx_peer 即 peer_qps/qps）。
+# rx_only 结果行：qpn psn opcode len data [payload_byte|pattern] [imm] [qkey src_qpn（UD）] va rkey slot_bytes count；多 QP 时 RC 也带
+#   src_qpn，末尾另有 rx_qps tx_qps flows。tx_peer 结果行字段名与含义相同（另带 src_qpn，WRITE_IMM 带 va/rkey），两端可逐字段比对。
+#   两个仿真对打的启动脚本（rdma_rx_start.tcl ::rdma_rx_peer 1、rdma_tx_peer_start.tcl）把它作为握手 rx_ready 的数据，见 rdma_work
+#   集成 README“两个仿真对打”；多 QP 只是起点加数量，单 QP 时结果行不变。
 # rdma_run 不再接受 group=（flow group 已删除，只剩 rdma_traffic_vseq 里供模型测试用的 SV 字段）；多对 Function 依次各发一条 rdma_run。
-rdma.rx_wait.timeout_us: 100                       # rdma_rx_wait 等 rx_only 登记的入站报文全部完成的上限，缺省 rdma.env.response_timeout_us，>0
+rdma.rx_wait.timeout_us: 100                       # rdma_rx_wait 等 rx_only 登记的入站报文全部完成的上限，缺省 rdma.env.response_timeout_us，>0；多条流时结果附逐流 收到/期望（unexpected=错投条数）
 # rdma_stop [cmd=<名>]：不给时取消 rdma_run，给出时取消该名字的 rdma_run 类命令（如 aip_bind_seq 复制的）；空闲返回 OK，
 #   名字不存在或不是 rdma_run 类返回 ERROR。流量作为子 sequence 随命令一起取消，不销毁已建资源。
 
@@ -758,7 +787,8 @@ RXE_IP: 10.79.0.2                                  # rxe 侧 IPv4
 RDMA_RANDOM_COUNT: 200                             # 独立模型 rdma_random_vseq 的随机 verb 数
 # rxe 插件 pre_build 强制 mode=RXE、link_type=rdma_link_rxe、qp.timeout=0、qp.qkey=0x12345678（覆盖命令行值）。
 # 仅测试用：+RDMA_LINK/+RDMA_VSEQ（独立 env test 的 link/vseq 初值）、+EXPECT_DEPTH/+EXPECT_DRAWS（场景测试断言）、
-#   +RXE_CASES（rxe 用例数）、+RDMA_TEST_INIT、+grant_expect_qp[=N]（组合回归 fixture）、
+#   +PEER_CASE/+PEER_MQP（rdma_env_peer_test/rdma_env_peer_mqp_test 的用例）、+FLOWS_QPS/+FLOWS_PEER_QPS/+FLOWS
+#   （rdma_scenario_flows_test 的双端 QP 数与流）、+RXE_CASES（rxe 用例数）、+RDMA_TEST_INIT、+grant_expect_qp[=N]（组合回归 fixture）、
 #   +RDMA_MSIX_EXPECT_MASKED（rdma_msix_test：要求至少一个 EQ 向量的消息是 masked）。
 # 已删除：rdma[.hH[.pfP[.vfV]]].resource.eth_port 出现即 build 报错（QSCH dport 跟随 route.dst_port，UD 为 15）；
 #   旧 rdma.biz.* 与 rdma.env 下的旧 QP 参数已删除但不报错（静默忽略）。
@@ -830,6 +860,22 @@ eth0.load_max_pct: 100                             # 随机负载上限 %，1..1
 eth0.max_pending: 64                               # >0；driver 预取深度（满则反压 sequence），兼 loopback 队列上限
 eth0.loopback: 0                                   # TX→RX 原样回环，仅 MAC+ACTIVE；每帧 TX EOP 重读，可 set_param 中途开关
 # loopback 未给出（含 clear_param 后）保持当前值；队列满报 ETH_LOOPBACK_OVERFLOW 并丢该帧，去 FCS 后 <9B 不回环。
+
+# SimFlow SHM 联仿（可选 add-on：编 eth_seg_agent_shm.f 与 shm_work，见 eth_seg_agent 的 docs/integration/shm.md）。shm 在 build
+#   读一次；其余在 SHM 链路 build 时读一次，不合法即 fatal（ETH_SHM_CFG）。SHM 传输参数（+SHM_*）与节点脚本前的 shm_wait_ready
+#   由 SimFlow def_shm_cosim 生成，不手写；一个仿真只能有一个 shm=1 的 agent。
+eth0.shm: 0                                        # 1=TX 整帧进 SHM fabric、对端的帧经 rx_driver 注入；只允许 ETH_SEG_MAC + UVM_ACTIVE，与 loopback 互斥；没编 eth_seg_shm_pkg 时报 ETH_AGENT_SHM
+eth0.shm_queue_depth: 256                          # 各级 SHM 队列与解码队列深度，>0；满即 fatal（没有反压）
+eth0.shm_max_frame: 2032                           # 含 FCS 的最大帧长，1..16368 且 ≤ fabric slot_size-16；MTU 4096 用 8176（slot_size 8192）
+eth0.shm_tx_timeout_ms: 1000                       # fabric 满或对端暂停时单帧发送重试的墙钟上限（ms，每次重试睡 1ms），>0，超时 fatal
+eth0.shm_idle_sleep_us: 0                          # 接收空闲时每次轮询（仿真时间 100ns）在宿主侧休眠的微秒数，<1000000；限制空闲一方的仿真时间推进
+eth0.shm_wait_poll_ns: 1                           # eth_shm_wait 每次轮询推进的仿真时间（ns），>0；等待期间 endpoint 也按它轮询
+eth0.shm_wait_sleep_us: 1000                       # eth_shm_wait 每次轮询在宿主侧休眠的微秒数，<1000000
+eth0.shm_wait_timeout_ms: 600000                   # eth_shm_wait 不给 timeout_ms 时的墙钟上限（ms），>0
+# 两个仿真之间的带内控制信号（同一条 SHM 链路，不交给 DUT）：eth_shm_signal name=<名字> [data=<可打印文本，≤1000 字符>] 返回
+#   "OK: eth_shm_signal: <名字>"；eth_shm_wait name=<名字> [timeout_ms=<毫秒>] 墙钟等对端的同名信号，返回 "OK: eth_shm_wait: <数据>"，
+#   超时为 "ERROR: eth_shm_wait: no '<名字>' signal from the peer within <n> ms ..."。信号按名字排队，先到的不丢；没有 shm=1 的链路
+#   时两条命令都返回 ERROR。rdma_work 的两个启动脚本用 rx_ready/rx_done/tx_done 做握手与结束前互等。
 
 # AIP 发包命令（示例包 eth_seg_aip_pkg / eth_net_packet_aip_pkg，宏映射 eth0..eth3，按 AGENT_NAME 增删）：
 #   <agent>_send / <agent>_net_send count=N（缺省 1，须 ≥1）或 time=T（到期 kill）。
@@ -987,6 +1033,12 @@ VIRTIO_COMPLETION_MODE: MSIX                       # MSIX 或 POLLING（也认�
 #   integration/project/rdma_rx_start.tcl。它依次执行 load_params、dut_config、rdma_init、rdma_run rx_only=1，按返回字段用
 #   <agent>_net_send 逐包发 RoCEv2（PSN 递增），最后 rdma_rx_wait。负载模式先取 ::rdma_data_mode，再取 +rdma.traffic.data_mode，
 #   都没有时设为 FIXED,INCREMENT；只允许 FIXED/INCREMENT，其他值在发任何命令前报错。
+# RDMA 两个仿真对打（SimFlow SHM 联仿，参考 rdma_work 的 integration/project/example/shm）：接收端设 ::rdma_rx_peer 1 后 source
+#   rdma_rx_start.tcl，发送端 source rdma_tx_peer_start.tcl，两端的 eth0 都是 shm=1。缺省握手：接收端 rdma_run rx_only=1 建好 QP、
+#   投好 RECV 后 eth_shm_signal name=rx_ready（结果行 + src_qpn + 本端 dmac/dst_ip），发送端 eth_shm_wait 拿到后原样接在
+#   rdma_run tx_peer=1 后面；发完、收齐后互发 tx_done/rx_done 再 end_test（先结束的一端会关掉 SHM 端口）。多 QP 时接收端另给
+#   ::rdma_qps/::rdma_peer_qps/::rdma_flows（节点脚本取 rdma.run.qps/peer_qps/flows），握手另带 rx_qps/tx_qps/flows，发送端的
+#   ::rdma_qps（rdma.run.qps）须等于 tx_qps。::rdma_shm_handshake 0 关掉握手（两端事先约定全部字段）。
 # 快照恢复：aip_restore → 重新 source AIP 加载脚本 → load_params → dut_config。恢复后参数宏改读本次 simv 的 plusarg，
 #   快照内的 set_param 覆盖仍优先；只在 build 时读取的参数（如 top.*、pcie.*）保持快照里的值。参数日志开关按本次参数
 #   重读，恢复前的 set_cmdline_print 不保留，需要时恢复后再设。
