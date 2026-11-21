@@ -10,8 +10,8 @@
 # vio_tx.count、vio_rx_refill.qid）只是 Tcl 命令参数的记法，在命令行上写成 vio_tx count=100。
 #
 # 对应代码：各仓库的以下提交（2026-11-21；带 * 的是尚未推送到 GitHub 的本地提交）。
-#   aip_core 6211ce9       dpu_common 65a73fd    host_mem 557af36     pcie_work a61b86c      inter_pcie fd36553
-#   net_packet 7dd10da     virtio_work aea7478   rdma_work 675bc0e    eth_seg_agent 5b7fdb0  dpu_queue_work 5648732
+#   aip_core 6211ce9       dpu_common 442f45f    host_mem 557af36     pcie_work a61b86c      inter_pcie fd36553
+#   net_packet 7dd10da     virtio_work 05bb0c8   rdma_work bff006e    eth_seg_agent 5b7fdb0  dpu_queue_work 5648732
 #   flow_control 2b58bce
 # host_mem 由第 9 节的 dpu.mem_* 配置，自身不读参数；flow_control 不读参数；simflow 是运行流程工具，不在本文范围。
 #
